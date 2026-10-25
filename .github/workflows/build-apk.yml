@@ -89,8 +89,7 @@ jobs:
 
       - name: Install ffmpeg
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg
 
       - name: Generate 10s test video with audio tone
         run: |
@@ -106,48 +105,31 @@ jobs:
           api-level: 34
           arch: x86_64
           target: google_apis
-          options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           force-avd-creation: false
           disable-animations: true
-
-      - name: Install Maestro CLI
-        run: |
-          curl -Ls "https://github.com/mobile-dev-inc/maestro/releases/latest/download/maestro-$(uname -m)-linux" \
-            -o /tmp/maestro && chmod +x /tmp/maestro && sudo mv /tmp/maestro /usr/local/bin/maestro
-
-      - name: Install APK on Emulator
-        run: |
-          adb wait-for-device
-          adb install -r -d ./apk/app-debug.apk
-
-      - name: Grant Android Permissions
-        run: |
-          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_VIDEO
-          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_IMAGES
-          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_AUDIO
-          adb shell pm grant com.clipnova.editor android.permission.RECORD_AUDIO
-
-      - name: Push test video to emulator
-        run: |
-          adb shell mkdir -p /sdcard/Movies
-          adb push /tmp/test-video.mp4 /sdcard/Movies/test-video.mp4
-
-      - name: Run Maestro flows
-        run: |
-          export MAESTRO_DEVICE_ID=$(adb devices | tail -n +2 | head -n 1 | cut -f1)
-          maestro test .maestro/launch.yaml
-          maestro test .maestro/new-project.yaml
-          maestro test .maestro/play.yaml
-          maestro test .maestro/split-play.yaml
-          maestro test .maestro/pause-echo.yaml
-          maestro test .maestro/playhead-drag.yaml
-          maestro test .maestro/one-panel.yaml
-          maestro test .maestro/features.yaml
-          maestro test .maestro/edit-ops.yaml
-          maestro test .maestro/language-switch.yaml
-          maestro test .maestro/export.yaml
-          maestro test .maestro/back-button.yaml
-        continue-on-error: true
+          script: |
+            curl -Ls "https://github.com/mobile-dev-inc/maestro/releases/latest/download/maestro-$(uname -m)-linux" -o /tmp/maestro && chmod +x /tmp/maestro && sudo mv /tmp/maestro /usr/local/bin/maestro
+            adb wait-for-device
+            adb install -r -d /home/runner/work/novacut/novacut/apk/app-debug.apk
+            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_VIDEO
+            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_IMAGES
+            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_AUDIO
+            adb shell pm grant com.clipnova.editor android.permission.RECORD_AUDIO
+            adb shell mkdir -p /sdcard/Movies
+            adb push /tmp/test-video.mp4 /sdcard/Movies/test-video.mp4
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/launch.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/new-project.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/play.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/split-play.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/pause-echo.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/playhead-drag.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/one-panel.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/features.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/edit-ops.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/language-switch.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/export.yaml
+            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/back-button.yaml
 
       - name: Collect failure artifacts
         if: failure()
