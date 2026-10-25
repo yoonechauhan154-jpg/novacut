@@ -1255,7 +1255,7 @@ export function App() {
         >
           ClipNova
         </a>
-        <span className="text-[10px] text-slate-500 shrink-0 whitespace-nowrap ml-2">19bc8e9</span>
+        <span className="text-[10px] text-slate-500 shrink-0 whitespace-nowrap ml-2">ac589e8</span>
 
         {/* Zone 2: 4 concise single-line text navigation links */}
         <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 flex-wrap">
