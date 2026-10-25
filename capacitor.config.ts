@@ -1,0 +1,24 @@
+import type { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: 'com.clipnova.editor',
+  appName: 'ClipNova',
+  webDir: 'dist',
+  bundledWebRuntime: false,
+  backgroundColor: '#0B0F17',
+  android: {
+    allowMixedContent: true,
+    captureInput: true,
+    webContentsDebuggingEnabled: true,
+    backgroundColor: '#0B0F17',
+  },
+  plugins: {
+    StatusBar: {
+      style: 'DARK',
+      backgroundColor: '#090D14',
+      overlaysWebView: false,
+    },
+  },
+};
+
+export default config;

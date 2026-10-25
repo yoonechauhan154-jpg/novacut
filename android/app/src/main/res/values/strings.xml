@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ClipNova</string>
+    <string name="title_activity_main">ClipNova</string>
+    <string name="package_name">com.clipnova.editor</string>
+    <string name="custom_url_scheme">com.clipnova.editor</string>
+</resources>

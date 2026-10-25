@@ -1,0 +1,6 @@
+{
+  "name": "ClipNova Video Editor & Product Studio",
+  "description": "Short-form mobile & web multi-track video editor with Devanagari/Hindi & English captions, real-time canvas effects, beat-synced audio, and interactive Master Product Specification.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
