@@ -108,9 +108,9 @@ jobs:
       - name: Run Emulator and Maestro Tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 30
           arch: x86_64
-          target: google_apis
+          target: default
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           force-avd-creation: true
           emulator-boot-timeout: 600
