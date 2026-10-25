@@ -40,3 +40,37 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #334155;
 }
+
+
+/* Safe Area Padding - max(env(), fallback) pattern per user spec */
+:root {
+  --safe-area-top: max(env(safe-area-inset-top, 0px), 32px);
+  --safe-area-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+  --safe-area-left: max(env(safe-area-inset-left, 0px), 16px);
+  --safe-area-right: max(env(safe-area-inset-right, 0px), 16px);
+}
+
+/* Apply safe area padding to root container (covers header + bottom toolbar) */
+#root {
+  padding-top: var(--safe-area-top);
+  padding-bottom: var(--safe-area-bottom);
+  padding-left: var(--safe-area-left);
+  padding-right: var(--safe-area-right);
+  min-width: 0;
+}
+
+/* Horizontal overflow fallback - ensure no content overflows */
+html, body #root {
+  overflow-x: hidden;
+  min-width: 0;
+}
+
+/* Min-width zero for flex children to allow wrapping */
+* {
+  min-width: 0;
+}
+
+/* Header and bottom toolbar get safe area padding too */
+header, [class*="toolbar"], [class*="bottom-toolbar"], [class*="player-bar"] {
+  min-width: 0;
+}

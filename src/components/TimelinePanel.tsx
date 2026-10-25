@@ -305,8 +305,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       onPointerLeave={handlePointerUp}
     >
       {/* Timeline Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-[#0F1522] border-b border-slate-800/80">
-        <div className="flex items-center gap-1.5 overflow-x-auto">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 pb-6 bg-[#0F1522] border-b border-slate-800/80 min-w-0">
+        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
           <button
             type="button"
             onClick={onUndo}
@@ -431,11 +431,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         </div>
 
         {/* Right: Timecode + Magnetic Snap + Zoom */}
-        <div className="flex items-center gap-3">
-          <div className="font-mono tabular-nums text-xs text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-            <span className="text-amber-400 font-semibold">{formatTimecode(playheadTime)}</span>
+        <div className="flex items-center gap-3 shrink-0 min-w-0">
+          <div className="font-mono tabular-nums text-xs text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 truncate">
+            <span className="text-amber-400 font-semibold truncate">{formatTimecode(playheadTime)}</span>
             <span className="mx-1.5 text-slate-600">/</span>
-            <span>{formatTimecode(totalDuration)}</span>
+            <span className="truncate">{formatTimecode(totalDuration)}</span>
           </div>
 
           <button

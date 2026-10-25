@@ -13,10 +13,11 @@ const config: CapacitorConfig = {
     backgroundColor: '#0B0F17',
   },
   plugins: {
-    StatusBar: {
+    SystemBars: {
+      insetsHandling: 'css',
       style: 'DARK',
-      backgroundColor: '#090D14',
-      overlaysWebView: false,
+      hidden: false,
+      animation: 'NONE',
     },
   },
 };

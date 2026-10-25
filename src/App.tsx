@@ -101,7 +101,7 @@ export function App() {
     } catch {
       // ignore
     }
-    return 'hi';
+    return 'en';
   });
 
   useEffect(() => {
@@ -1165,7 +1165,7 @@ export function App() {
       )}
 
       {/* TOP BAR CONTRACT: 3 Zones separated by gap-3 on phone, gap-8 on desktop */}
-      <header className="flex items-center justify-between gap-2 sm:gap-8 px-3 sm:px-6 py-2.5 sm:py-3 bg-[#090D14] border-b border-slate-800/90 shrink-0">
+      <header className="flex items-center justify-between gap-2 sm:gap-8 px-3 sm:px-6 py-2.5 sm:py-3 bg-[#090D14] border-b border-slate-800/90 shrink-0 flex-wrap sm:flex-nowrap">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#editor"
@@ -1179,7 +1179,7 @@ export function App() {
         </a>
 
         {/* Zone 2: 4 concise single-line text navigation links */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 overflow-x-auto">
+        <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 flex-wrap">
           <a
             href="#editor"
             onClick={(e) => {
@@ -1239,7 +1239,7 @@ export function App() {
         </nav>
 
         {/* Zone 3: Language Switcher + Primary Export Action */}
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-3 flex-wrap shrink-0">
           <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5">
             <Globe className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             <select
@@ -2742,7 +2742,7 @@ export function App() {
               </div>
 
               {/* Playback Transport Bar */}
-              <div className="w-full max-w-xl flex items-center justify-between gap-4 px-4 py-2 rounded-xl bg-[#0F1522] border border-slate-800/90">
+              <div className="w-full max-w-full flex flex-wrap items-center justify-between gap-4 px-3 py-2 rounded-xl bg-[#0F1522] border border-slate-800/90 min-w-0">
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -2794,7 +2794,7 @@ export function App() {
                   aria-label="Playhead Scrubber"
                 />
 
-                <div className="font-mono tabular-nums text-xs text-slate-300 shrink-0">
+                <div className="font-mono tabular-nums text-xs text-slate-300 shrink-0 min-w-0 truncate">
                   {playheadTime.toFixed(2)}s / {totalDuration.toFixed(2)}s
                 </div>
               </div>
