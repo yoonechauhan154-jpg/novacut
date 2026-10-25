@@ -1,7 +1,8 @@
-import { Capacitor, registerPlugin } from '@capacitor/core';
+import { Capacitor } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
+import { App } from '@capacitor/app';
 
 export const BUILD_ID: string =
   (typeof import.meta !== 'undefined' &&
@@ -17,7 +18,12 @@ interface CapacitorAppPlugin {
   exitApp?: () => Promise<void>;
 }
 
-const CapApp = registerPlugin<CapacitorAppPlugin>('App');
+let CapApp: CapacitorAppPlugin | null = null;
+try {
+  CapApp = App as unknown as CapacitorAppPlugin;
+} catch {
+  CapApp = null;
+}
 
 export function isAndroidNativeApp(): boolean {
   try {
