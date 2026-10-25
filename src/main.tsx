@@ -20,7 +20,16 @@ import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import { initAndroidNativeBridge } from './utils/androidBridge.ts';
+import { ErrorBoundary, installGlobalErrorHandlers } from './ErrorBoundary';
 
 initAndroidNativeBridge();
 
-createRoot(document.getElementById('root')!).render(<App />);
+// Install global error handlers so crashes show a red box instead of blank screen
+installGlobalErrorHandlers();
+
+createRoot(document.getElementById('root')!).render(
+  <ErrorBoundary>
+    <div id="error-global-root"></div>
+    <App />
+  </ErrorBoundary>
+);

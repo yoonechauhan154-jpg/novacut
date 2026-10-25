@@ -33,6 +33,8 @@ import {
   Volume2,
   Wand2,
   X,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import { SpecBlueprintView } from './components/SpecBlueprintView';
 import { TimelinePanel } from './components/TimelinePanel';
@@ -2185,7 +2187,27 @@ export function App() {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => handleAddStarterClipFromId(item.id, 'video')}
+                                    onClick={() => {
+                                      const existingOnTrack = project.clips.filter(
+                                        (c) => c.trackType === item.trackType
+                                      );
+                                      const startAt = existingOnTrack.reduce(
+                                        (max, c) => Math.max(max, c.startTime + c.duration),
+                                        0
+                                      );
+                                      updateProjectWithHistory((prev) => ({
+                                        ...prev,
+                                        clips: [
+                                          ...prev.clips,
+                                          {
+                                            ...item,
+                                            id: `clip-${Date.now()}`,
+                                            startTime: Number(startAt.toFixed(2)),
+                                          },
+                                        ],
+                                      }));
+                                      setSelectedClipId(item.id);
+                                    }}
                                     className="min-h-[34px] px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-medium flex items-center gap-1 whitespace-nowrap"
                                   >
                                     <Plus className="w-3 h-3" />
@@ -3228,7 +3250,7 @@ export function App() {
                           fileName,
                           `ClipNova Video Export (${project.resolution})`
                         );
-                        if (res.saved) {
+                        if (res.savedPath) {
                           triggerToast(
                             isAndroidNativeApp()
                               ? `Saved to Android device storage (${fileName})`
