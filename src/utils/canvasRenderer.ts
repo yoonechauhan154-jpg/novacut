@@ -609,7 +609,8 @@ export function renderProjectFrame(
   project: ProjectData,
   playheadTime: number,
   mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
-  qualityMode: 'preview-540p' | 'export-full' = 'preview-540p'
+  qualityMode: 'preview-540p' | 'export-full' = 'preview-540p',
+  isPlaying: boolean = false
 ) {
   const { width: w, height: h } = getAspectDimensions(
     project.aspectRatio,
@@ -834,10 +835,15 @@ export function renderProjectFrame(
         const el = mediaElementCache.get(clip.id);
         if (el) {
           if (el instanceof HTMLVideoElement) {
-            const targetTime =
-              (clip.inPoint + effectiveOffset) % Math.max(0.5, el.duration || clip.duration);
-            if (Math.abs(el.currentTime - targetTime) > 0.28) {
-              el.currentTime = targetTime;
+            // Only seek when NOT playing — during playback let the video element
+            // advance naturally (requestVideoFrameCallback would drive this).
+            // Seeking every frame while playing is the #1 cause of stutter on 1080p+ clips.
+            if (!isPlaying) {
+              const targetTime =
+                (clip.inPoint + effectiveOffset) % Math.max(0.5, el.duration || clip.duration);
+              if (Math.abs(el.currentTime - targetTime) > 0.28) {
+                el.currentTime = targetTime;
+              }
             }
           }
           ctx.drawImage(el, 0, 0, w, h);

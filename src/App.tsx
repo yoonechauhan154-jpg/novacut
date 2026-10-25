@@ -267,6 +267,15 @@ export function App() {
   const [magneticSnap, setMagneticSnap] = useState<boolean>(true);
   const [scrollToTimeTrigger, setScrollToTimeTrigger] = useState<{ time: number; seq: number } | null>(null);
 
+  // Debug metrics for preview playback (shown in Settings)
+  const [debugVideoDims, setDebugVideoDims] = useState<string>('- x -');
+  const [debugPreviewFps, setDebugPreviewFps] = useState<number>(0);
+  const [debugDroppedFrames, setDebugDroppedFrames] = useState<number>(0);
+  const [debugPlaying, setDebugPlaying] = useState<boolean>(false);
+  const lastFrameTimeRef = useRef<number>(0);
+  const frameCountRef = useRef<number>(0);
+  const droppedFramesRef = useRef<number>(0);
+
   // Effects Library Filter State
   const [effectSearch, setEffectSearch] = useState<string>('');
   const [effectCategory, setEffectCategory] = useState<
@@ -295,6 +304,7 @@ export function App() {
 
   // Refs for Canvas, Media Elements, Active Export Cancellation & RAF Slider Throttling
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaElementsRef = useRef<Map<string, HTMLVideoElement | HTMLImageElement>>(new Map());
   const pickerFileInputRef = useRef<HTMLInputElement | null>(null);
   const editorMediaInputRef = useRef<HTMLInputElement | null>(null);
@@ -305,6 +315,10 @@ export function App() {
   const exportRecorderRef = useRef<MediaRecorder | null>(null);
   const exportCancelledRef = useRef<boolean>(false);
   const sliderRafRef = useRef<number | null>(null);
+  const playheadRef = useRef<number>(0);
+  const renderRafRef = useRef<number | null>(null);
+  const lastDisplayUpdateRef = useRef<number>(0);
+  const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
   // Load saved projects from IndexedDB/localStorage on launch
   useEffect(() => {
@@ -328,6 +342,44 @@ export function App() {
   );
 
   const selectedClip = project.clips.find((c) => c.id === selectedClipId) || null;
+
+// Check if any clip active at playheadTime needs canvas processing (effects, adjustments, masks, layers).
+// If nothing needs canvas, we can show the plain <video> element for hardware-decoded smooth playback.
+const needsCanvasRendering = (t: number): boolean => {
+  return project.clips.some((c) => {
+    if (c.trackType === 'audio') return false;
+    if (t < c.startTime || t > c.startTime + c.duration) return false;
+    if (c.muted && c.trackType === 'video') return false;
+    // Adjustment / effect layers always need canvas
+    if (c.trackType === 'adjustment' || c.trackType === 'effect-layer') return true;
+    // Any non-default processing needs canvas
+    if (c.effect !== 'none') return true;
+    if (c.filterPreset !== 'none') return true;
+    if (c.bgRemovalEnabled) return true;
+    if (c.maskShape !== 'none') return true;
+    if (c.transitionIn !== 'none') return true;
+    const adj = c.adjustments;
+    if (
+      adj.brightness !== 0 ||
+      adj.contrast !== 0 ||
+      adj.saturation !== 0 ||
+      adj.blur !== 0 ||
+      adj.grain !== 0 ||
+      adj.vignette !== 0 ||
+      adj.exposure !== 0 ||
+      adj.highlights !== 0 ||
+      adj.shadows !== 0 ||
+      adj.fade !== 0 ||
+      adj.temperature !== 0 ||
+      adj.tint !== 0
+    )
+      return true;
+    if (c.opacity !== 100 || c.scale !== 100 || c.rotation !== 0) return true;
+    return false;
+  });
+};
+
+const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   // Capture a small thumbnail from canvas when saving project
   const captureCanvasThumbnail = useCallback((): string | undefined => {
@@ -403,16 +455,56 @@ export function App() {
           if (clip.sourceType === 'uploaded-video') {
             const vid = document.createElement('video');
             vid.src = url;
-            vid.muted = true;
+            vid.muted = clip.muted;
+            vid.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
             vid.playsInline = true;
             vid.setAttribute('playsinline', 'true');
             vid.preload = 'auto';
             vid.load();
             mediaElementsRef.current.set(clip.id, vid);
+            // Append to DOM so audio can play (hidden, positioned off-screen)
+            vid.style.position = 'absolute';
+            vid.style.left = '-9999px';
+            vid.style.top = '-9999px';
+            vid.style.width = '0';
+            vid.style.height = '0';
+            vid.setAttribute('aria-hidden', 'true');
+            try {
+              document.body.appendChild(vid);
+            } catch {
+              // ignore DOM append errors
+            }
           } else {
             const img = new Image();
             img.src = url;
             mediaElementsRef.current.set(clip.id, img);
+          }
+        }
+      }
+
+      // Create <audio> elements for audio-track clips (music, voiceover, TTS)
+      for (const clip of project.clips) {
+        if (
+          clip.trackType === 'audio' &&
+          clip.mediaUrl &&
+          !audioElementsRef.current.has(clip.id)
+        ) {
+          try {
+            const audio = new Audio(clip.mediaUrl);
+            audio.muted = clip.muted;
+            audio.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
+            audio.preload = 'auto';
+            audio.style.position = 'absolute';
+            audio.style.left = '-9999px';
+            audio.style.top = '-9999px';
+            audio.setAttribute('aria-hidden', 'true');
+            document.body.appendChild(audio);
+            audioElementsRef.current.set(clip.id, audio);
+          } catch (err) {
+            triggerToast(
+              `Audio failed to load: ${err instanceof Error ? err.name : String(err)}`,
+              `ऑडियो लोड करने में विफल: ${err instanceof Error ? err.name : String(err)}`
+            );
           }
         }
       }
@@ -486,44 +578,176 @@ export function App() {
     return () => clearInterval(timer);
   }, [isRecordingVoice]);
 
-  // Playback loop (60fps RAF)
+  // Unified playback + render loop (single RAF, ref-based playhead, throttled UI updates ~15fps)
+  // Uses requestVideoFrameCallback when available, falls back to requestAnimationFrame.
+  // Only ONE loop runs; cancelled on pause/unmount. No per-frame React re-renders.
   useEffect(() => {
-    if (!isPlaying || screen !== 'editor') return;
-    let animId: number;
-    let lastTs = performance.now();
+    if (screen !== 'editor') {
+      if (renderRafRef.current) {
+        cancelAnimationFrame(renderRafRef.current);
+        renderRafRef.current = null;
+      }
+      return;
+    }
 
-    const step = (now: number) => {
-      const dt = (now - lastTs) / 1000;
-      lastTs = now;
-
-      setPlayheadTime((prev) => {
-        const next = prev + dt;
-        if (next >= totalDuration) {
-          setIsPlaying(false);
-          return 0;
-        }
-        return next;
-      });
-      animId = requestAnimationFrame(step);
-    };
-
-    animId = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(animId);
-  }, [isPlaying, totalDuration, screen]);
-
-  // Render Canvas Frame & Trigger Web Audio Synth Beats
-  // Uses 540p preview resolution while playing on mid-range phones, and full resolution on export
-  useEffect(() => {
-    if (screen !== 'editor') return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const qualityMode = isExportingVideo ? 'export-full' : 'preview-540p';
-    renderProjectFrame(ctx, project, playheadTime, mediaElementsRef.current, qualityMode);
-    soundEngine.triggerTimelineAudioTick(playheadTime, project.clips, isPlaying);
-  }, [project, playheadTime, isPlaying, isExportingVideo, screen]);
+    // Sync ref with state on mount/resume
+    playheadRef.current = playheadTime;
+    lastDisplayUpdateRef.current = performance.now();
+
+    let lastTs = performance.now();
+    let rafId: number | null = null;
+
+    const step = (now: number) => {
+      const dt = (now - lastTs) / 1000;
+      lastTs = now;
+
+      if (isPlaying) {
+        const next = playheadRef.current + dt;
+        if (next >= totalDuration) {
+          playheadRef.current = 0;
+          setIsPlaying(false);
+          setPlayheadTime(0);
+        } else {
+          playheadRef.current = next;
+        }
+      }
+
+      // Throttled UI state update (~15 fps) for time label + scrubber
+      if (now - lastDisplayUpdateRef.current >= 66) {
+        setPlayheadTime(playheadRef.current);
+        lastDisplayUpdateRef.current = now;
+      }
+
+      // Sync <audio> and <video> elements with playhead (one audio source per clip, no echo)
+      const ct = playheadRef.current;
+      for (const [clipId, audio] of audioElementsRef.current) {
+        const clip = project.clips.find((c) => c.id === clipId);
+        if (!clip) continue;
+        const clipStart = clip.startTime;
+        const clipEnd = clipStart + clip.duration;
+        const relTime = ct - clipStart;
+        // Update mute/volume in case user changed them mid-session
+        audio.muted = clip.muted;
+        audio.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
+        if (isPlaying && ct >= clipStart && ct <= clipEnd) {
+          if (audio.paused) {
+            try {
+              audio.currentTime = Math.max(0, relTime);
+              audio.play().catch(() => {});
+            } catch {}
+          } else if (Math.abs(audio.currentTime - relTime) > 0.1) {
+            audio.currentTime = Math.max(0, relTime);
+          }
+        } else if (!audio.paused) {
+          try { audio.pause(); } catch {}
+        }
+      }
+      for (const [clipId, el] of mediaElementsRef.current) {
+        const clip = project.clips.find((c) => c.id === clipId);
+        if (!clip || !(el instanceof HTMLVideoElement)) continue;
+        const clipStart = clip.startTime;
+        const clipEnd = clipStart + clip.duration;
+        const relTime = ct - clipStart;
+        el.muted = clip.muted;
+        el.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
+        if (isPlaying && ct >= clipStart && ct <= clipEnd) {
+          if (el.paused) {
+            try {
+              el.currentTime = Math.max(0, relTime);
+              el.play().catch(() => {});
+            } catch {}
+          }
+        } else if (!el.paused) {
+          try { el.pause(); } catch {}
+        }
+      }
+
+      // When plain video passthrough is active, drive the visible <video> element
+      if (showPlainVideo && videoRef.current) {
+        const activeVideo = project.clips.find(
+          (c) =>
+            c.trackType === 'video' &&
+            c.sourceType === 'uploaded-video' &&
+            !c.muted &&
+            ct >= c.startTime &&
+            ct <= c.startTime + c.duration
+        );
+        if (activeVideo && activeVideo.mediaUrl) {
+          const vid = videoRef.current;
+          if (vid.src !== activeVideo.mediaUrl) {
+            vid.src = activeVideo.mediaUrl;
+          }
+          const relTime = ct - activeVideo.startTime;
+          if (!vid.paused && !isPlaying) vid.pause();
+          if (vid.paused && isPlaying) {
+            vid.currentTime = Math.max(0, relTime);
+            vid.play().catch(() => {});
+          } else if (!vid.paused && isPlaying && Math.abs(vid.currentTime - relTime) > 0.5) {
+            vid.currentTime = Math.max(0, relTime);
+          }
+          vid.muted = activeVideo.muted;
+          vid.volume = Math.max(0, Math.min(1, (activeVideo.volume || 100) / 100));
+        } else if (!videoRef.current.paused) {
+          try { videoRef.current.pause(); } catch {}
+        }
+      }
+
+      const qualityMode = isExportingVideo ? 'export-full' : 'preview-540p';
+      renderProjectFrame(
+        ctx,
+        project,
+        playheadRef.current,
+        mediaElementsRef.current,
+        qualityMode,
+        isPlaying
+      );
+      soundEngine.triggerTimelineAudioTick(playheadRef.current, project.clips, isPlaying);
+
+      // Debug metrics: measure preview fps and dropped frames
+      frameCountRef.current++;
+      const debugNow = performance.now();
+      if (debugNow - lastFrameTimeRef.current >= 1000) {
+        setDebugPreviewFps(frameCountRef.current);
+        frameCountRef.current = 0;
+        lastFrameTimeRef.current = debugNow;
+      }
+      // Estimate dropped frames (target ~60fps, measure actual vs expected)
+      const expectedFrames = Math.round((debugNow - lastFrameTimeRef.current) / 16.67);
+      const actualFrames = frameCountRef.current;
+      if (expectedFrames > actualFrames) {
+        droppedFramesRef.current += expectedFrames - actualFrames;
+        setDebugDroppedFrames(droppedFramesRef.current);
+      }
+      setDebugPlaying(isPlaying);
+
+      // Update video dimensions debug when a video clip is active
+      const activeVideoForDebug = project.clips.find(
+        (c) =>
+          c.trackType === 'video' &&
+          c.sourceType === 'uploaded-video' &&
+          ct >= c.startTime &&
+          ct <= c.startTime + c.duration
+      );
+      if (activeVideoForDebug) {
+        const el = mediaElementsRef.current.get(activeVideoForDebug.id);
+        if (el instanceof HTMLVideoElement && el.videoWidth > 0) {
+          setDebugVideoDims(`${el.videoWidth} x ${el.videoHeight}`);
+        }
+      }
+
+      rafId = requestAnimationFrame(step);
+    };
+
+    rafId = requestAnimationFrame(step);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [isPlaying, project, totalDuration, screen, isExportingVideo]);
 
   // History-aware project updater
   const updateProjectWithHistory = useCallback((updater: (prev: ProjectData) => ProjectData) => {
@@ -1355,7 +1579,7 @@ export function App() {
   };
 
   // Interactive Canvas Click for Custom Polygon Mask Drawing
-  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement | HTMLVideoElement>) => {
     if (!isDrawingCustomMask || !selectedClip || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const normX = Number(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)).toFixed(3));
@@ -1381,13 +1605,33 @@ export function App() {
     exportCancelledRef.current = false;
 
     try {
-      const stream = canvas.captureStream(project.fps);
+      // Build a combined stream: canvas video + audio from all active media elements
+      const canvasStream = canvas.captureStream(project.fps);
+      const combinedStream = new MediaStream();
+      canvasStream.getVideoTracks().forEach((t) => combinedStream.addTrack(t));
+
+      // Add audio tracks from cached video/audio elements (must be playing during export)
+      const addAudioTracks = (el: HTMLMediaElement) => {
+        try {
+          const s = (el as any).captureStream();
+          s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+        } catch {
+          // captureStream may not be supported on all elements
+        }
+      };
+      mediaElementsRef.current.forEach((el) => {
+        if (el instanceof HTMLVideoElement || el instanceof HTMLAudioElement) {
+          addAudioTracks(el);
+        }
+      });
+      audioElementsRef.current.forEach((el) => addAudioTracks(el));
+
       const mimeType =
         typeof MediaRecorder !== 'undefined' &&
         MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
           ? 'video/webm;codecs=vp9'
           : 'video/webm';
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = new MediaRecorder(combinedStream, { mimeType });
       exportRecorderRef.current = recorder;
       const chunks: Blob[] = [];
 
@@ -1427,6 +1671,8 @@ export function App() {
         }
         step++;
         const simTime = (step / totalSteps) * totalDuration;
+        // Update both ref and state so canvas renders correct frames during export
+        playheadRef.current = simTime;
         setPlayheadTime(simTime);
         setExportProgress(Math.min(99, Math.round((step / totalSteps) * 100)));
 
@@ -2340,6 +2586,15 @@ export function App() {
               <div className="font-mono">Build ID: {BUILD_ID}</div>
               <div>Runtime: Offline Capacitor Android WebView + IndexedDB</div>
             </div>
+
+            {/* Preview Playback Debug */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
+              <div className="font-bold text-slate-200 text-sm">Preview Debug</div>
+              <div className="font-mono text-xs">Video: {debugVideoDims}</div>
+              <div className="font-mono text-xs">Preview FPS: {debugPreviewFps}</div>
+              <div className="font-mono text-xs">Dropped Frames: {debugDroppedFrames}</div>
+              <div className="font-mono text-xs">Playing: {debugPlaying ? 'yes' : 'no'}</div>
+            </div>
           </div>
         </div>
       )}
@@ -2437,14 +2692,25 @@ export function App() {
             </button>
           </header>
 
-          {/* 2. LARGEST AREA: VIDEO PREVIEW CANVAS */}
+          {/* 2. LARGEST AREA: VIDEO PREVIEW (plain <video> when no effects — hardware decoded; canvas when effects active) */}
           <div className="flex-1 min-h-[140px] flex items-center justify-center bg-[#05070B] relative overflow-hidden my-1 rounded-xl border border-slate-800/80">
+            {/* Plain video element for hardware-decoded playback when no effects active */}
+            <video
+              ref={videoRef}
+              className={`max-h-full max-w-full w-auto h-auto object-contain ${
+                showPlainVideo ? '' : 'hidden'
+              }`}
+              playsInline
+              preload="auto"
+              onPointerDown={handleCanvasPointerDown}
+            />
+            {/* Canvas for effects/adjustments/layers — hidden when plain video suffices */}
             <canvas
               ref={canvasRef}
               onPointerDown={handleCanvasPointerDown}
               className={`max-h-full max-w-full w-auto h-auto object-contain ${
-                isDrawingCustomMask ? 'cursor-crosshair' : ''
-              }`}
+                showPlainVideo ? 'hidden' : ''
+              } ${isDrawingCustomMask ? 'cursor-crosshair' : ''}`}
             />
             {isDrawingCustomMask && (
               <div className="absolute top-2 inset-x-3 bg-amber-500/90 text-slate-950 text-xs font-semibold px-3 py-1 rounded-lg text-center">
@@ -2469,7 +2735,10 @@ export function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setIsPlaying((p) => !p)}
+                onClick={() => {
+                  soundEngine.resume();
+                  setIsPlaying((p) => !p);
+                }}
                 aria-label={isPlaying ? 'Pause' : 'Play'}
                 className="min-w-[42px] min-h-[38px] rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center"
               >

@@ -22,6 +22,11 @@ class ClipNovaSoundEngine {
     return this.ctx;
   }
 
+  /** Public resume so the Play button can restart the AudioContext on user gesture (Android WebView requirement). */
+  public resume(): void {
+    this.ensureContext();
+  }
+
   public triggerTimelineAudioTick(
     playheadTime: number,
     clips: TimelineClip[],
