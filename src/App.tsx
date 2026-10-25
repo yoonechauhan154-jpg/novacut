@@ -1023,6 +1023,49 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     }, 120);
   };
 
+  // Test mode: load the pre-pushed test video directly without the system picker.
+  // Only available when VITE_TEST_MODE=true (never in the normal release APK).
+  const handleLoadTestVideo = () => {
+    if (!import.meta.env.VITE_TEST_MODE) return;
+    const testClip = createBaseClip({
+      id: 'test-video-clip',
+      trackId: 'main-video',
+      trackType: 'video',
+      title: 'Test Video',
+      startTime: 0,
+      duration: 10,
+      sourceType: 'uploaded-video',
+    });
+    // Override source-specific fields for the test video
+    Object.assign(testClip, {
+      mediaUrl: 'file:///sdcard/Movies/test-video.mp4',
+      sourceStart: 0,
+      sourceEnd: 10,
+      speed: 1,
+      volume: 100,
+      muted: false,
+      filterPreset: 'none',
+      effect: 'none',
+      transitionIn: 'none',
+      transitionDuration: 0.3,
+      adjustments: { ...DEFAULT_ADJUSTMENTS },
+      keyframes: [],
+    });
+    updateProjectWithHistory((prev) => ({
+      ...prev,
+      clips: [testClip],
+      updatedAt: new Date().toISOString(),
+    }));
+    setSelectedClipId(testClip.id);
+    setPlayheadTime(0);
+    setIsPlaying(false);
+    setScreen('editor');
+    triggerToast(
+      'Test video loaded',
+      'टेस्ट वीडियो लोड किया गया'
+    );
+  };
+
   const handlePickerFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -2223,6 +2266,21 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                         </span>
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {/* Hidden test-mode button: only visible when VITE_TEST_MODE=true */}
+                {import.meta.env.VITE_TEST_MODE === 'true' && (
+                  <div className="space-y-2.5">
+                    <button
+                      type="button"
+                      onClick={handleLoadTestVideo}
+                      aria-label="Load test video (test mode)"
+                      className="w-full min-h-[56px] p-3 rounded-2xl bg-red-500/20 hover:bg-red-500/30 border border-red-500/50 text-red-400 font-bold text-xs flex items-center justify-center gap-2"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>Load test video (test mode)</span>
+                    </button>
                   </div>
                 )}
 
