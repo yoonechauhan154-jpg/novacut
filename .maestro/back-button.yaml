@@ -1,0 +1,62 @@
+appId: com.clipnova.editor
+
+- launchApp:
+    clearState: true
+
+- waitFor:
+    element:
+      hasText: "ClipNova"
+    timeout: 30000
+
+- tapOn:
+    element:
+      hasContentDescription: "Open Settings"
+
+- waitForTimeout: 1000
+
+- pressBack
+
+- waitForTimeout: 1000
+
+- assertVisible:
+    element:
+      hasText: "ClipNova"
+
+- tapOn:
+    element:
+      hasContentDescription: "New Project"
+
+- waitFor:
+    element:
+      hasContentDescription: "Browse Phone Gallery"
+    timeout: 30000
+
+- tapOn:
+    element:
+      hasContentDescription: "Browse Phone Gallery"
+
+- waitFor:
+    element:
+      hasContentDescription: "Load test video (test mode)"
+    timeout: 10000
+
+- tapOn:
+    element:
+      hasContentDescription: "Load test video (test mode)"
+
+- waitForTimeout: 2000
+
+- pressBack
+
+- waitForTimeout: 1000
+
+- assertVisible:
+    element:
+      hasText: "ClipNova"
+
+- screenshot:
+    outputPath: back-button.png
+
+- assertNotVisible:
+    element:
+      hasText: "Runtime Error Diagnostic"

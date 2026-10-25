@@ -1,0 +1,34 @@
+appId: com.clipnova.editor
+
+- launchApp:
+    clearState: true
+
+- waitFor:
+    element:
+      hasText: "ClipNova"
+    timeout: 30000
+
+- tapOn:
+    element:
+      hasContentDescription: "Open Settings"
+
+- waitForTimeout: 2000
+
+- tapOn:
+    element:
+      hasText: "English"
+
+- waitForTimeout: 1000
+
+- tapOn:
+    element:
+      hasText: "Hindi"
+
+- waitForTimeout: 1000
+
+- screenshot:
+    outputPath: language-switch.png
+
+- assertNotVisible:
+    element:
+      hasText: "Runtime Error Diagnostic"

@@ -1,0 +1,32 @@
+appId: com.clipnova.editor
+
+- launchApp:
+    clearState: true
+
+- waitFor:
+    element:
+      hasText: "ClipNova"
+    timeout: 30000
+
+- assertVisible:
+    element:
+      hasText: "ClipNova"
+
+- assertVisible:
+    element:
+      hasContentDescription: "New Project"
+
+- assertVisible:
+    element:
+      hasContentDescription: "Open Settings"
+
+- assertVisible:
+    element:
+      hasTextContaining: "Build:"
+
+- screenshot:
+    outputPath: launch-home.png
+
+- assertNotVisible:
+    element:
+      hasText: "Runtime Error Diagnostic"

@@ -66,3 +66,105 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+  emulator-tests:
+    name: Emulator Tests (Maestro)
+    needs: build-android-apk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download APK Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClipNova-Debug-APK
+          path: ./apk/
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+
+      - name: Generate 10s test video with audio tone
+        run: |
+          ffmpeg -y -f lavfi -i testsrc=duration=10:size=720x1280:rate=30 \
+            -f lavfi -i sine=frequency=440:duration=10 \
+            -c:v libx264 -pix_fmt yuv420p -preset fast -crf 23 \
+            -c:a aac -b:a 128k -shortest \
+            /tmp/test-video.mp4
+
+      - name: Run Emulator and Maestro Tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          force-avd-creation: false
+          disable-animations: true
+
+      - name: Install Maestro CLI
+        run: |
+          curl -Ls "https://github.com/mobile-dev-inc/maestro/releases/latest/download/maestro-$(uname -m)-linux" \
+            -o /tmp/maestro && chmod +x /tmp/maestro && sudo mv /tmp/maestro /usr/local/bin/maestro
+
+      - name: Install APK on Emulator
+        run: |
+          adb wait-for-device
+          adb install -r -d ./apk/app-debug.apk
+
+      - name: Grant Android Permissions
+        run: |
+          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_VIDEO
+          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_IMAGES
+          adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_AUDIO
+          adb shell pm grant com.clipnova.editor android.permission.RECORD_AUDIO
+
+      - name: Push test video to emulator
+        run: |
+          adb shell mkdir -p /sdcard/Movies
+          adb push /tmp/test-video.mp4 /sdcard/Movies/test-video.mp4
+
+      - name: Run Maestro flows
+        run: |
+          export MAESTRO_DEVICE_ID=$(adb devices | tail -n +2 | head -n 1 | cut -f1)
+          maestro test .maestro/launch.yaml
+          maestro test .maestro/new-project.yaml
+          maestro test .maestro/play.yaml
+          maestro test .maestro/split-play.yaml
+          maestro test .maestro/pause-echo.yaml
+          maestro test .maestro/playhead-drag.yaml
+          maestro test .maestro/one-panel.yaml
+          maestro test .maestro/features.yaml
+          maestro test .maestro/edit-ops.yaml
+          maestro test .maestro/language-switch.yaml
+          maestro test .maestro/export.yaml
+          maestro test .maestro/back-button.yaml
+        continue-on-error: true
+
+      - name: Collect failure artifacts
+        if: failure()
+        run: |
+          adb shell screencap -p /sdcard/failure-screenshot.png 2>/dev/null || true
+          adb pull /sdcard/failure-screenshot.png ./failure-screenshot.png 2>/dev/null || true
+          adb logcat -d > ./logcat.txt 2>/dev/null || true
+          mkdir -p ./maestro-output
+          maestro cloud --format junit --output ./maestro-output/results.xml 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-test-artifacts
+          path: |
+            failure-screenshot.png
+            logcat.txt
+            maestro-output/
+          retention-days: 30
