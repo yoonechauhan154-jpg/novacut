@@ -31,6 +31,8 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Build Offline Web Bundle
+        env:
+          VITE_BUILD_ID: ${{ github.sha }}
         run: npm run build
 
       - name: Add Android Platform (if not committed)

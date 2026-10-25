@@ -4,7 +4,6 @@ const config: CapacitorConfig = {
   appId: 'com.clipnova.editor',
   appName: 'ClipNova',
   webDir: 'dist',
-  bundledWebRuntime: false,
   backgroundColor: '#0B0F17',
   android: {
     allowMixedContent: true,

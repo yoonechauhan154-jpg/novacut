@@ -7,19 +7,34 @@
     --font-mono: 'JetBrains Mono', monospace;
   }
 
-  body {
+  html,
+  body,
+  #root {
     font-family: var(--font-sans);
-    background-color: #0B0F17;
+    background-color: #070A10;
     color: #F1F5F9;
+    width: 100%;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
     overflow-x: hidden;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
   }
 
-  h1, h2, h3, .font-display {
+  h1,
+  h2,
+  h3,
+  .font-display {
     font-family: var(--font-display);
     text-wrap: balance;
   }
 
-  .font-mono, .tabular-nums {
+  .font-mono,
+  .tabular-nums {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
@@ -27,11 +42,11 @@
 
 /* Custom studio scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
-  background: #0B0F17;
+  background: #070A10;
 }
 ::-webkit-scrollbar-thumb {
   background: #1E293B;
@@ -41,36 +56,11 @@
   background: #334155;
 }
 
-
-/* Safe Area Padding - max(env(), fallback) pattern per user spec */
-:root {
-  --safe-area-top: max(env(safe-area-inset-top, 0px), 32px);
-  --safe-area-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
-  --safe-area-left: max(env(safe-area-inset-left, 0px), 16px);
-  --safe-area-right: max(env(safe-area-inset-right, 0px), 16px);
+/* Hide scrollbar on compact mobile toolbars while preserving scroll */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }
-
-/* Apply safe area padding to root container (covers header + bottom toolbar) */
-#root {
-  padding-top: var(--safe-area-top);
-  padding-bottom: var(--safe-area-bottom);
-  padding-left: var(--safe-area-left);
-  padding-right: var(--safe-area-right);
-  min-width: 0;
-}
-
-/* Horizontal overflow fallback - ensure no content overflows */
-html, body #root {
-  overflow-x: hidden;
-  min-width: 0;
-}
-
-/* Min-width zero for flex children to allow wrapping */
-* {
-  min-width: 0;
-}
-
-/* Header and bottom toolbar get safe area padding too */
-header, [class*="toolbar"], [class*="bottom-toolbar"], [class*="player-bar"] {
-  min-width: 0;
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

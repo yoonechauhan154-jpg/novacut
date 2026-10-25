@@ -119,6 +119,18 @@ export interface ColorAdjustments {
   lutName?: string;
 }
 
+export interface ImportedMediaItem {
+  id: string;
+  name: string;
+  kind: 'video' | 'image' | 'audio' | 'procedural';
+  mediaUrl?: string;
+  mediaBlobId?: string;
+  thumbnailUrl?: string;
+  duration: number;
+  scenePreset?: 'mumbai-drive' | 'wedding-haldi' | 'himalaya-sunrise' | 'tech-studio' | 'neon-bazaar';
+  createdAt: string;
+}
+
 export interface TimelineClip {
   id: string;
   trackId: string;
@@ -143,6 +155,8 @@ export interface TimelineClip {
     | 'effect-layer';
   scenePreset?: 'mumbai-drive' | 'wedding-haldi' | 'himalaya-sunrise' | 'tech-studio' | 'neon-bazaar';
   mediaUrl?: string;
+  mediaBlobId?: string;
+  thumbnailUrl?: string;
   // Transform & playback
   speed: number; // 0.1 to 10
   speedCurve: SpeedCurvePreset;
@@ -220,9 +234,11 @@ export interface ProjectData {
   fps: 24 | 25 | 30 | 50 | 60;
   resolution: '480p' | '720p' | '1080p' | '2K' | '4K';
   updatedAt: string;
+  thumbnailUrl?: string;
   background: CanvasBackgroundConfig;
   watermarkEnabled: boolean;
   isProUnlocked: boolean;
+  importedMedia?: ImportedMediaItem[];
   clips: TimelineClip[];
 }
 

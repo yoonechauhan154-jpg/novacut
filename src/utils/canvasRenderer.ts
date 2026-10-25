@@ -9,22 +9,42 @@ import {
   VideoEffectType,
 } from '../types/editor';
 
-export function getAspectDimensions(ratio: AspectRatioKey): { width: number; height: number } {
+export function getAspectDimensions(
+  ratio: AspectRatioKey,
+  qualityMode: 'preview-540p' | 'export-full' = 'preview-540p',
+  projectRes: ProjectData['resolution'] = '1080p'
+): { width: number; height: number } {
+  const mult =
+    qualityMode === 'preview-540p'
+      ? 1.0
+      : projectRes === '480p'
+      ? 0.85
+      : projectRes === '720p'
+      ? 1.333
+      : projectRes === '1080p'
+      ? 2.0
+      : 2.0; // cap canvas buffer to 1080p equivalent on mobile WebView to prevent OOM
+
+  const scaleDim = (w: number, h: number) => ({
+    width: Math.round((w * mult) / 2) * 2,
+    height: Math.round((h * mult) / 2) * 2,
+  });
+
   switch (ratio) {
     case '9:16':
-      return { width: 540, height: 960 };
+      return scaleDim(540, 960);
     case '16:9':
-      return { width: 960, height: 540 };
+      return scaleDim(960, 540);
     case '1:1':
-      return { width: 720, height: 720 };
+      return scaleDim(640, 640);
     case '4:5':
-      return { width: 640, height: 800 };
+      return scaleDim(540, 675);
     case '4:3':
-      return { width: 800, height: 600 };
+      return scaleDim(720, 540);
     case '21:9':
-      return { width: 1050, height: 450 };
+      return scaleDim(960, 412);
     default:
-      return { width: 540, height: 960 };
+      return scaleDim(540, 960);
   }
 }
 
@@ -588,9 +608,14 @@ export function renderProjectFrame(
   ctx: CanvasRenderingContext2D,
   project: ProjectData,
   playheadTime: number,
-  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  qualityMode: 'preview-540p' | 'export-full' = 'preview-540p'
 ) {
-  const { width: w, height: h } = getAspectDimensions(project.aspectRatio);
+  const { width: w, height: h } = getAspectDimensions(
+    project.aspectRatio,
+    qualityMode,
+    project.resolution
+  );
   if (ctx.canvas.width !== w || ctx.canvas.height !== h) {
     ctx.canvas.width = w;
     ctx.canvas.height = h;

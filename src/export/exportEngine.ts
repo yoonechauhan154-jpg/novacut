@@ -6,9 +6,10 @@ import { saveAndShareFileOnDevice } from '../utils/androidBridge';
  * color balance / contrast / warmth adjustments for live non-destructive preview.
  */
 export function parseCubeLutFile(
-  fileName: string,
-  content: string
-): Partial<ColorAdjustments> {
+  content: string,
+  fileName: string
+): { lutName: string; adjustmentsPatch: Partial<ColorAdjustments> } {
+  const cleanName = fileName.replace(/\.[^/.]+$/i, '') || 'Custom LUT';
   const lines = content
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -31,10 +32,13 @@ export function parseCubeLutFile(
 
   if (count === 0) {
     return {
-      lutName: fileName,
-      contrast: 14,
-      saturation: 18,
-      temperature: 16,
+      lutName: cleanName,
+      adjustmentsPatch: {
+        lutName: cleanName,
+        contrast: 14,
+        saturation: 18,
+        temperature: 16,
+      },
     };
   }
 
@@ -43,10 +47,13 @@ export function parseCubeLutFile(
   const warmth = Math.round((rAvg - bAvg) * 65);
 
   return {
-    lutName: fileName.replace(/\.cube$/i, ''),
-    contrast: 12,
-    saturation: 15,
-    temperature: Math.max(-40, Math.min(40, warmth)),
+    lutName: cleanName,
+    adjustmentsPatch: {
+      lutName: cleanName,
+      contrast: 12,
+      saturation: 15,
+      temperature: Math.max(-40, Math.min(40, warmth)),
+    },
   };
 }
 
@@ -56,27 +63,79 @@ export async function downloadProjectJson(project: ProjectData) {
   return saveAndShareFileOnDevice(blob, fileName, 'ClipNova Project Archive');
 }
 
+function formatSrtTime(sec: number): string {
+  const hrs = Math.floor(sec / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  const secs = Math.floor(sec % 60);
+  const ms = Math.round((sec % 1) * 1000);
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(
+    2,
+    '0'
+  )},${String(ms).padStart(3, '0')}`;
+}
+
+export async function downloadSrtSubtitles(project: ProjectData) {
+  const textClips = project.clips
+    .filter((c) => c.trackType === 'text' && c.textContent)
+    .sort((a, b) => a.startTime - b.startTime);
+
+  const srtContent =
+    textClips.length === 0
+      ? '1\n00:00:00,000 --> 00:00:03,000\nClipNova Studio Subtitles\n'
+      : textClips
+          .map(
+            (c, i) =>
+              `${i + 1}\n${formatSrtTime(c.startTime)} --> ${formatSrtTime(
+                c.startTime + c.duration
+              )}\n${c.textContent}\n`
+          )
+          .join('\n');
+
+  const blob = new Blob([srtContent], { type: 'text/plain;charset=utf-8' });
+  const fileName = `${project.name.replace(/\s+/g, '_')}_Captions.srt`;
+  return saveAndShareFileOnDevice(blob, fileName, 'ClipNova SRT Subtitles');
+}
+
+export async function downloadFcpXml(project: ProjectData) {
+  const clipsXml = project.clips
+    .map(
+      (c) =>
+        `        <clip name="${c.title.replace(/"/g, '&quot;')}" offset="${c.startTime}s" duration="${c.duration}s" track="${c.trackType}" />`
+    )
+    .join('\n');
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <project name="${project.name.replace(/"/g, '&quot;')}">
+    <sequence format="${project.resolution}" tcStart="0s" renderFps="${project.fps}">
+      <spine>
+${clipsXml}
+      </spine>
+    </sequence>
+  </project>
+</fcpxml>`;
+
+  const blob = new Blob([xml], { type: 'application/xml;charset=utf-8' });
+  const fileName = `${project.name.replace(/\s+/g, '_')}_Timeline.fcpxml`;
+  return saveAndShareFileOnDevice(blob, fileName, 'ClipNova FCPXML Timeline');
+}
+
 export const FEATURE_IMPLEMENTATION_CHECKLIST = {
   fullyWorking: [
-    'Language Switcher (English + हिन्दी Devanagari) in Top Bar with instant i18n dictionary & localStorage persistence',
-    'Non-Destructive Adjustment Layers (separate track, applies brightness, contrast, saturation, exposure, highlights, shadows, temperature, tint, sharpen, vignette, grain, blur, hue/HSL, opacity & blend mode to all layers below)',
-    'Non-Destructive Effect Overlay Layers (separate track, applies 18+ procedural shader/canvas effects to all layers below over its exact time range, with keyframeable intensity)',
-    'Full Timeline Manipulation on Adjustment/Effect/Media/Text Clips (drag-and-drop, trim handles, split at playhead, duplicate, delete, mute, magnetic beat snapping, unlimited Undo/Redo)',
-    'Trending Effects & Transitions Library (Search grounded: Glitch, RGB Split, VHS, Film Grain, Light Leak, Flash, Shake, Zoom Punch, Whip Pan, Spin, Kaleidoscope, Pixelate, Blur, Glow, Speed Ramp, Freeze, Slide, Wipe, Dissolve, Zoom, Fade, Cube, Ripple, Luma Fade)',
-    'Keyframe Animation with Easing Curves (Linear, Ease-In-Out, Ease-Out-Back, Cubic-Bezier) on Scale, X/Y Position, Rotation, Opacity, Brightness & Effect Intensity',
-    'Masks (Linear, Circle, Rectangle, Heart, Star, and Interactive Custom Polygon Draw on Preview Canvas) with Invert & Feather',
-    'Auto Captions (Hindi देवनागरी, Hinglish, English) with editable text, karaoke word-by-word highlighting & animated styles',
-    'Text-to-Speech (Web Speech API voice synthesis in Hindi & English) + Live Microphone Voiceover Recording + Beat Detection & Auto-Cut-to-Beat',
-    '.CUBE LUT File Import, 1-Tap Templates with Slot Replacement, Auto-Save Drafts, and Real WebM Video Export (720p/1080p/4K, 24/30/60fps, Pro Watermark Toggle)',
+    'CapCut-Style Mobile App Flow: Home Screen on launch, New Project full-screen Media Picker with multi-select numbered badges, Empty Timeline except selected clips, and IndexedDB project/media persistence',
+    'CapCut-Style Mobile Editor Layout: Top bar (Back, Tap-to-Rename, Export), largest Video Preview area (540p fast playback, full quality export), Slim Player Bar, Timeline with Pinch-Zoom & Action Row, and 14-Tool Bottom Bar',
+    'Single Open Bottom Sheet (~40dvh) with Accordions (only 1 group open at a time) and 44px touch sliders with numeric value & per-slider Reset button',
+    'Language Switcher (English default on first launch via clipnova_lang_v3 + हिन्दी Devanagari) in Settings with instant i18n dictionary',
+    'Non-Destructive Adjustment Layers & Effect Overlay Layers (separate tracks, apply color/tone & 18+ procedural shaders to all tracks below)',
+    'Reliable Android WebView Media Importer: URL.createObjectURL, hidden DOM <video muted playsinline preload="metadata"> with 5s timeout, 0.1s seek thumbnail capture, and step-by-step toasts',
+    'React Error Boundary + window.onerror / unhandledrejection Red Diagnostic Box with "Copy error" button + Build ID display',
   ],
   partialBestEffort: [
-    'In-Browser AI Background Remover (uses best-effort foreground subject ellipse/luminance matte; shows toast notice)',
-    'Chroma Key Green Screen (live color-picker & similarity controls with composite matte; shows toast notice)',
-    'Video Stabilization & Motion Tracking (best-effort optical crop damping & keyframe trajectory linking between clips; shows toast notice)',
-    'Smooth Slow-Motion & Voice Changer (time-remap curve interpolation & Web Audio pitch/filter synthesis; shows toast notice)',
+    'In-Browser AI Background Remover, Chroma Key Green Screen, Video Stabilization & Motion Tracking (best-effort canvas compositing)',
+    'Smooth Slow-Motion & Voice Changer (time-remap curve interpolation & Web Audio pitch/filter synthesis)',
   ],
   missingNativeOnly: [
-    'Hardware-accelerated MediaCodec / C++ FFmpeg H.264/HEVC MP4 container muxing (browser exports standard VP9/WebM via MediaRecorder)',
-    'Cloud Whisper large-v3 server transcription & RIFE GPU optical-flow neural frame generation (requires cloud GPU backend)',
+    'Hardware MediaCodec H.264 MP4 container muxing (Android WebView MediaRecorder outputs .webm; warning badge is shown in Export Modal)',
   ],
 };

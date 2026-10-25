@@ -2,7 +2,6 @@
 	"appId": "com.clipnova.editor",
 	"appName": "ClipNova",
 	"webDir": "dist",
-	"bundledWebRuntime": false,
 	"backgroundColor": "#0B0F17",
 	"android": {
 		"allowMixedContent": true,
@@ -11,10 +10,11 @@
 		"backgroundColor": "#0B0F17"
 	},
 	"plugins": {
-		"StatusBar": {
+		"SystemBars": {
+			"insetsHandling": "css",
 			"style": "DARK",
-			"backgroundColor": "#090D14",
-			"overlaysWebView": false
+			"hidden": false,
+			"animation": "NONE"
 		}
 	}
 }

@@ -1,8 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Copy,
   Diamond,
-  Layers,
   Magnet,
   Rewind,
   RotateCcw,
@@ -21,6 +20,8 @@ import {
 import { LanguageCode, t } from '../i18n/translations';
 import { TimelineClip, TrackType, TransitionType, VideoEffectType } from '../types/editor';
 
+const TRACK_HEADER_WIDTH = 108;
+
 interface TimelinePanelProps {
   lang: LanguageCode;
   clips: TimelineClip[];
@@ -31,6 +32,7 @@ interface TimelinePanelProps {
   magneticSnap: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  scrollToTimeTrigger?: { time: number; seq: number } | null;
   onSelectClip: (id: string | null) => void;
   onSeek: (time: number) => void;
   onZoomChange: (px: number) => void;
@@ -61,6 +63,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   magneticSnap,
   canUndo,
   canRedo,
+  scrollToTimeTrigger,
   onSelectClip,
   onSeek,
   onZoomChange,
@@ -90,8 +93,18 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   } | null>(null);
 
   const selectedClip = clips.find((c) => c.id === selectedClipId) || null;
-  const timelineDuration = Math.max(12, Math.ceil(totalDuration + 3));
+  const timelineDuration = Math.max(10, Math.ceil(totalDuration + 3));
   const timelineWidthPx = timelineDuration * zoomPxPerSec;
+
+  // Scroll timeline to newly added clip when requested
+  useEffect(() => {
+    if (!scrollToTimeTrigger || !scrollContainerRef.current) return;
+    const targetLeft = Math.max(0, scrollToTimeTrigger.time * zoomPxPerSec - 40);
+    scrollContainerRef.current.scrollTo({
+      left: targetLeft,
+      behavior: 'smooth',
+    });
+  }, [scrollToTimeTrigger, zoomPxPerSec]);
 
   const TRACK_DEFINITIONS: {
     type: TrackType;
@@ -99,6 +112,30 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     badge: string;
     colorClass: string;
   }[] = [
+    {
+      type: 'video',
+      i18nKey: 'trackVideo',
+      badge: 'VID',
+      colorClass: 'bg-indigo-500/25 border-indigo-400/60 text-indigo-100',
+    },
+    {
+      type: 'audio',
+      i18nKey: 'trackAudio',
+      badge: 'AUD',
+      colorClass: 'bg-emerald-500/20 border-emerald-500/50 text-emerald-200',
+    },
+    {
+      type: 'text',
+      i18nKey: 'trackText',
+      badge: 'TXT',
+      colorClass: 'bg-amber-500/20 border-amber-500/50 text-amber-200',
+    },
+    {
+      type: 'overlay',
+      i18nKey: 'trackOverlay',
+      badge: 'PIP',
+      colorClass: 'bg-sky-500/20 border-sky-500/50 text-sky-200',
+    },
     {
       type: 'effect-layer',
       i18nKey: 'trackEffectLayer',
@@ -112,34 +149,10 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       colorClass: 'bg-cyan-500/20 border-cyan-400/60 text-cyan-100',
     },
     {
-      type: 'text',
-      i18nKey: 'trackText',
-      badge: 'TXT',
-      colorClass: 'bg-amber-500/20 border-amber-500/50 text-amber-200',
-    },
-    {
       type: 'sticker',
       i18nKey: 'trackSticker',
       badge: 'STK',
       colorClass: 'bg-rose-500/20 border-rose-500/50 text-rose-200',
-    },
-    {
-      type: 'overlay',
-      i18nKey: 'trackOverlay',
-      badge: 'PIP',
-      colorClass: 'bg-sky-500/20 border-sky-500/50 text-sky-200',
-    },
-    {
-      type: 'video',
-      i18nKey: 'trackVideo',
-      badge: 'VID',
-      colorClass: 'bg-indigo-500/25 border-indigo-400/60 text-indigo-100',
-    },
-    {
-      type: 'audio',
-      i18nKey: 'trackAudio',
-      badge: 'AUD',
-      colorClass: 'bg-emerald-500/20 border-emerald-500/50 text-emerald-200',
     },
   ];
 
@@ -167,7 +180,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     if (!scrollContainerRef.current) return;
     const rect = scrollContainerRef.current.getBoundingClientRect();
     const scrollLeft = scrollContainerRef.current.scrollLeft;
-    const clickX = e.clientX - rect.left + scrollLeft - 160;
+    const clickX = e.clientX - rect.left + scrollLeft - TRACK_HEADER_WIDTH;
     if (clickX < 0) return;
     const targetSec = applySnap(clickX / zoomPxPerSec);
     onSeek(Math.max(0, Math.min(timelineDuration, targetSec)));
@@ -260,7 +273,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     if (!scrollContainerRef.current) return;
     const rect = scrollContainerRef.current.getBoundingClientRect();
     const scrollLeft = scrollContainerRef.current.scrollLeft;
-    const dropX = Math.max(0, e.clientX - rect.left + scrollLeft - 160);
+    const dropX = Math.max(0, e.clientX - rect.left + scrollLeft - TRACK_HEADER_WIDTH);
     const dropTime = applySnap(dropX / zoomPxPerSec);
 
     const payloadRaw = e.dataTransfer.getData('application/clipnova-item');
@@ -288,216 +301,200 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     }
   };
 
-  const formatTimecode = (sec: number) => {
-    const mins = Math.floor(sec / 60);
-    const secs = Math.floor(sec % 60);
-    const frames = Math.floor((sec % 1) * 30);
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}:${String(
-      frames
-    ).padStart(2, '0')}`;
-  };
-
   return (
     <section
-      className="flex flex-col bg-[#0B0F17] border-t border-slate-800/90 select-none shrink-0"
+      className="flex flex-col bg-[#0B0F17] border-t border-slate-800/90 select-none shrink-0 min-w-0 w-full"
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
     >
-      {/* Timeline Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 pb-[var(--safe-area-bottom)] bg-[#0F1522] border-b border-slate-800/80 min-w-0">
-        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+      {/* Compact CapCut-Style Scrollable Action Toolbar Row */}
+      <div className="flex items-center justify-between gap-1.5 px-2 py-1 bg-[#0E131F] border-b border-slate-800/80 min-w-0">
+        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 min-w-0 flex-1">
           <button
             type="button"
             onClick={onUndo}
             disabled={!canUndo}
-            title="Undo (Ctrl+Z)"
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-35 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+            aria-label={t(lang, 'btnUndo')}
+            className="min-h-[40px] min-w-[44px] px-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>{t(lang, 'btnUndo')}</span>
+            <span className="text-[11px] leading-none">{t(lang, 'btnUndo')}</span>
           </button>
+
           <button
             type="button"
             onClick={onRedo}
             disabled={!canRedo}
-            title="Redo (Ctrl+Y)"
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-35 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+            aria-label={t(lang, 'btnRedo')}
+            className="min-h-[40px] min-w-[44px] px-2 rounded-lg text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
           >
             <RotateCw className="w-3.5 h-3.5" />
-            <span>{t(lang, 'btnRedo')}</span>
+            <span className="text-[11px] leading-none">{t(lang, 'btnRedo')}</span>
           </button>
 
-          <div className="h-4 w-px bg-slate-800 mx-0.5" />
-
-          {/* Non-Destructive Adjustment Layer & Effect Overlay Layer Quick Creators */}
-          <button
-            type="button"
-            onClick={onCreateAdjustmentLayer}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-200 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{t(lang, 'btnAddAdjustment')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onCreateEffectLayer('light-leak', playheadTime)}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-semibold bg-fuchsia-500/15 hover:bg-fuchsia-500/25 border border-fuchsia-500/40 text-fuchsia-200 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-            <span>{t(lang, 'btnAddEffectLayer')}</span>
-          </button>
-
-          <div className="h-4 w-px bg-slate-800 mx-0.5" />
+          <div className="h-5 w-px bg-slate-800 mx-0.5 shrink-0" />
 
           <button
             type="button"
             onClick={onSplitAtPlayhead}
             disabled={!selectedClip}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+            aria-label={t(lang, 'btnSplit')}
+            className="min-h-[40px] min-w-[48px] px-2 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
           >
             <Scissors className="w-3.5 h-3.5 text-amber-400" />
-            <span>{t(lang, 'btnSplit')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onDuplicateSelected}
-            disabled={!selectedClip}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
-          >
-            <Copy className="w-3.5 h-3.5 text-sky-400" />
-            <span>{t(lang, 'btnDuplicate')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onAddKeyframeAtPlayhead}
-            disabled={!selectedClip}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-40 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
-          >
-            <Diamond className="w-3.5 h-3.5 text-amber-400" />
-            <span>{t(lang, 'btnAddKeyframe')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onAutoBeatCut}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-200 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
-            title="Auto-Split Main Video on Audio Beat Markers"
-          >
-            <Wand2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{t(lang, 'btnAutoBeatCut')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleReverseSelected}
-            disabled={!selectedClip}
-            className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
-              selectedClip?.reversed
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200 disabled:opacity-40'
-            }`}
-          >
-            <Rewind className="w-3.5 h-3.5" />
-            <span>{t(lang, 'btnReverse')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleFreezeSelected}
-            disabled={!selectedClip}
-            className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
-              selectedClip?.frozen
-                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
-                : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200 disabled:opacity-40'
-            }`}
-          >
-            <Snowflake className="w-3.5 h-3.5" />
-            <span>{t(lang, 'btnFreeze')}</span>
+            <span className="text-[11px] leading-none">{t(lang, 'btnSplit')}</span>
           </button>
 
           <button
             type="button"
             onClick={onDeleteSelected}
             disabled={!selectedClip}
-            className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 disabled:opacity-35 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+            aria-label={t(lang, 'btnDelete')}
+            className="min-h-[40px] min-w-[48px] px-2 rounded-lg text-xs font-medium bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
           >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>{t(lang, 'btnDelete')}</span>
+            <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnDelete')}</span>
           </button>
-        </div>
 
-        {/* Right: Timecode + Magnetic Snap + Zoom */}
-        <div className="flex items-center gap-3 shrink-0 min-w-0">
-          <div className="font-mono tabular-nums text-xs text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 truncate">
-            <span className="text-amber-400 font-semibold truncate">{formatTimecode(playheadTime)}</span>
-            <span className="mx-1.5 text-slate-600">/</span>
-            <span className="truncate">{formatTimecode(totalDuration)}</span>
-          </div>
+          <button
+            type="button"
+            onClick={onDuplicateSelected}
+            disabled={!selectedClip}
+            aria-label={t(lang, 'btnDuplicate')}
+            className="min-h-[40px] min-w-[52px] px-2 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
+          >
+            <Copy className="w-3.5 h-3.5 text-sky-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnDuplicate')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onAddKeyframeAtPlayhead}
+            disabled={!selectedClip}
+            aria-label={t(lang, 'btnAddKeyframe')}
+            className="min-h-[40px] min-w-[52px] px-2 rounded-lg text-xs font-medium bg-slate-800/90 hover:bg-slate-700 text-slate-100 disabled:opacity-35 flex flex-col items-center justify-center gap-0.5 shrink-0"
+          >
+            <Diamond className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnAddKeyframe')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleReverseSelected}
+            disabled={!selectedClip}
+            aria-label={t(lang, 'btnReverse')}
+            className={`min-h-[40px] min-w-[48px] px-2 rounded-lg text-xs font-medium flex flex-col items-center justify-center gap-0.5 shrink-0 ${
+              selectedClip?.reversed
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                : 'bg-slate-800/90 text-slate-200 disabled:opacity-35'
+            }`}
+          >
+            <Rewind className="w-3.5 h-3.5" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnReverse')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleFreezeSelected}
+            disabled={!selectedClip}
+            aria-label={t(lang, 'btnFreeze')}
+            className={`min-h-[40px] min-w-[48px] px-2 rounded-lg text-xs font-medium flex flex-col items-center justify-center gap-0.5 shrink-0 ${
+              selectedClip?.frozen
+                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                : 'bg-slate-800/90 text-slate-200 disabled:opacity-35'
+            }`}
+          >
+            <Snowflake className="w-3.5 h-3.5" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnFreeze')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onCreateAdjustmentLayer}
+            aria-label={t(lang, 'btnAddAdjustment')}
+            className="min-h-[40px] px-2.5 rounded-lg text-xs font-semibold bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 flex flex-col items-center justify-center gap-0.5 shrink-0"
+          >
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnAddAdjustment')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onCreateEffectLayer('light-leak', playheadTime)}
+            aria-label={t(lang, 'btnAddEffectLayer')}
+            className="min-h-[40px] px-2.5 rounded-lg text-xs font-semibold bg-fuchsia-500/15 border border-fuchsia-500/40 text-fuchsia-200 flex flex-col items-center justify-center gap-0.5 shrink-0"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnAddEffectLayer')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onAutoBeatCut}
+            aria-label={t(lang, 'btnAutoBeatCut')}
+            className="min-h-[40px] px-2.5 rounded-lg text-xs font-medium bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 flex flex-col items-center justify-center gap-0.5 shrink-0"
+          >
+            <Wand2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[11px] leading-none">{t(lang, 'btnAutoBeatCut')}</span>
+          </button>
 
           <button
             type="button"
             onClick={onToggleMagneticSnap}
-            className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+            aria-label={t(lang, 'btnSnap')}
+            className={`min-h-[40px] px-2 rounded-lg text-xs font-medium flex flex-col items-center justify-center gap-0.5 shrink-0 ${
               magneticSnap
                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                : 'bg-slate-800 text-slate-400'
             }`}
           >
             <Magnet className="w-3.5 h-3.5" />
-            <span>
-              {t(lang, 'btnSnap')} {magneticSnap ? 'ON' : 'OFF'}
-            </span>
+            <span className="text-[11px] leading-none">{t(lang, 'btnSnap')}</span>
           </button>
 
-          <div className="hidden sm:flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => onZoomChange(Math.max(35, zoomPxPerSec - 15))}
-              className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200"
-              title="Zoom Out Timeline"
-            >
-              <ZoomOut className="w-4 h-4" />
-            </button>
-            <input
-              type="range"
-              min={35}
-              max={130}
-              value={zoomPxPerSec}
-              onChange={(e) => onZoomChange(Number(e.target.value))}
-              className="w-20 accent-amber-500 cursor-pointer"
-              aria-label="Timeline Zoom"
-            />
-            <button
-              type="button"
-              onClick={() => onZoomChange(Math.min(130, zoomPxPerSec + 15))}
-              className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200"
-              title="Zoom In Timeline"
-            >
-              <ZoomIn className="w-4 h-4" />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => onZoomChange(Math.max(35, zoomPxPerSec - 15))}
+            aria-label="Zoom Out Timeline"
+            className="min-h-[40px] min-w-[38px] rounded-lg bg-slate-900 text-slate-300 flex items-center justify-center shrink-0"
+          >
+            <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onZoomChange(Math.min(130, zoomPxPerSec + 15))}
+            aria-label="Zoom In Timeline"
+            className="min-h-[40px] min-w-[38px] rounded-lg bg-slate-900 text-slate-300 flex items-center justify-center shrink-0"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
       {/* Multi-Track Scrollable Timeline Area */}
       <div
         ref={scrollContainerRef}
-        className="relative overflow-x-auto overflow-y-auto max-h-[250px] sm:max-h-[275px] pb-[var(--safe-area-bottom)]"
+        className="relative overflow-x-auto overflow-y-auto h-[168px] sm:h-[205px]"
         onPointerDown={handleRulerPointerDown}
         onTouchStart={handleTouchStartPinch}
         onTouchMove={handleTouchMovePinch}
         onTouchEnd={handleTouchEndPinch}
       >
-        <div className="relative min-w-full" style={{ width: `${160 + timelineWidthPx}px` }}>
+        <div
+          className="relative min-w-full"
+          style={{ width: `${TRACK_HEADER_WIDTH + timelineWidthPx}px` }}
+        >
           {/* Time Ruler Row */}
-          <div className="sticky top-0 z-20 flex h-6 bg-[#0D131F] border-b border-slate-800/90">
-            <div className="sticky left-0 z-30 w-[160px] shrink-0 bg-[#0D131F] border-r border-slate-800 px-3 flex items-center justify-between text-[11px] font-medium text-slate-400">
-              <span>{lang === 'hi' ? 'ट्रैक्स (7 लेयर्स)' : 'Tracks (7 Layers)'}</span>
-              <span className="font-mono tabular-nums">30fps</span>
+          <div className="sticky top-0 z-20 flex h-5 bg-[#0D131F] border-b border-slate-800/90">
+            <div
+              style={{ width: `${TRACK_HEADER_WIDTH}px` }}
+              className="sticky left-0 z-30 shrink-0 bg-[#0D131F] border-r border-slate-800 px-2 flex items-center justify-between text-[11px] font-medium text-slate-400"
+            >
+              <span>{lang === 'hi' ? 'ट्रैक्स' : 'Tracks'}</span>
+              <span className="font-mono tabular-nums text-[10px]">
+                {Math.round(zoomPxPerSec)}px/s
+              </span>
             </div>
             <div className="relative flex-1">
               {Array.from({ length: timelineDuration + 1 }).map((_, sec) => (
@@ -522,26 +519,27 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 key={track.type}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => handleTrackDrop(e, track.type)}
-                className="flex h-9 border-b border-slate-800/60 bg-[#0B0F17] hover:bg-[#0E1420] transition-colors"
+                className="flex h-8 border-b border-slate-800/60 bg-[#0B0F17] hover:bg-[#0E1420] transition-colors"
               >
                 {/* Sticky Left Track Header */}
                 <div
                   onPointerDown={(e) => e.stopPropagation()}
-                  className="sticky left-0 z-20 w-[160px] shrink-0 bg-[#0F1522] border-r border-slate-800 px-2.5 flex items-center justify-between"
+                  style={{ width: `${TRACK_HEADER_WIDTH}px` }}
+                  className="sticky left-0 z-20 shrink-0 bg-[#0F1522] border-r border-slate-800 px-2 flex items-center justify-between"
                 >
-                  <div className="flex items-center gap-1.5 truncate pr-1">
-                    <span className="font-mono text-[9px] font-semibold text-slate-400">
+                  <div className="flex items-center gap-1 truncate pr-0.5 min-w-0">
+                    <span className="font-mono text-[10px] font-bold text-amber-400/90 shrink-0">
                       {track.badge}
                     </span>
-                    <span className="text-xs font-medium text-slate-200 truncate">
+                    <span className="text-[11px] font-medium text-slate-200 truncate">
                       {t(lang, track.i18nKey)}
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={() => onToggleTrackMute(track.type)}
-                    className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 shrink-0"
-                    title={allMuted ? 'Unmute / Show Track' : 'Mute / Hide Track'}
+                    aria-label={allMuted ? 'Unmute track' : 'Mute track'}
+                    className="min-w-[28px] min-h-[28px] flex items-center justify-center rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 shrink-0"
                   >
                     {allMuted ? (
                       <VolumeX className="w-3.5 h-3.5 text-rose-400" />
@@ -556,7 +554,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                   {trackClips.map((clip) => {
                     const isSelected = clip.id === selectedClipId;
                     const leftPx = clip.startTime * zoomPxPerSec;
-                    const widthPx = Math.max(24, clip.duration * zoomPxPerSec);
+                    const widthPx = Math.max(26, clip.duration * zoomPxPerSec);
 
                     return (
                       <div
@@ -566,7 +564,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                           left: `${leftPx}px`,
                           width: `${widthPx}px`,
                         }}
-                        className={`group touch-none absolute top-1 bottom-1 rounded-md border px-2.5 flex items-center justify-between cursor-grab active:cursor-grabbing overflow-hidden transition-shadow ${
+                        className={`group touch-none absolute top-0.5 bottom-0.5 rounded-md border px-2 flex items-center justify-between cursor-grab active:cursor-grabbing overflow-hidden transition-shadow ${
                           track.colorClass
                         } ${
                           isSelected
@@ -574,16 +572,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             : 'hover:brightness-110'
                         } ${clip.muted ? 'opacity-40' : ''}`}
                       >
-                        {/* Left Trim Handle (touch-friendly 12px hitbox) */}
+                        {/* Left Trim Handle (touch-friendly 14px hitbox) */}
                         <div
                           onPointerDown={(e) => startClipDrag(e, clip, 'trim-left')}
-                          className="touch-none absolute left-0 top-0 bottom-0 w-3 bg-amber-400/80 opacity-60 sm:opacity-0 group-hover:opacity-100 cursor-ew-resize"
+                          className="touch-none absolute left-0 top-0 bottom-0 w-3.5 bg-amber-400/80 opacity-75 sm:opacity-0 group-hover:opacity-100 cursor-ew-resize"
                           title="Drag to Trim In-Point"
                         />
 
-                        {/* Clip Title & Metadata */}
-                        <div className="flex items-center gap-1.5 truncate text-[11px] font-medium pointer-events-none">
-                          <span className="truncate">
+                        {/* Clip Thumbnail + Title */}
+                        <div className="flex items-center gap-1.5 truncate text-xs font-medium pointer-events-none pl-1">
+                          {clip.thumbnailUrl && (
+                            <img
+                              src={clip.thumbnailUrl}
+                              alt=""
+                              className="w-4 h-5 object-cover rounded-xs shrink-0 border border-white/20"
+                            />
+                          )}
+                          <span className="truncate text-[11px]">
                             {clip.trackType === 'text'
                               ? clip.textContent || clip.title
                               : clip.trackType === 'sticker'
@@ -598,16 +603,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                               ? clip.titleHi
                               : clip.title}
                           </span>
-                          {clip.transitionIn !== 'none' && (
-                            <span className="font-mono text-[9px] opacity-80">
-                              · {clip.transitionIn}
-                            </span>
-                          )}
-                          {clip.speed !== 1 && (
-                            <span className="font-mono tabular-nums text-[9px] opacity-80">
-                              · {clip.speed}x
-                            </span>
-                          )}
                         </div>
 
                         {/* Keyframe Diamonds */}
@@ -630,19 +625,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
                         {/* Audio Waveform & Beat Markers */}
                         {clip.trackType === 'audio' && (
-                          <div className="absolute inset-x-0 bottom-0.5 flex items-end h-2.5 pointer-events-none opacity-65">
-                            {Array.from({ length: Math.min(40, Math.floor(widthPx / 8)) }).map(
-                              (_, wIdx) => (
-                                <span
-                                  key={wIdx}
-                                  style={{
-                                    left: `${wIdx * 8}px`,
-                                    height: `${3 + ((wIdx * 7) % 8)}px`,
-                                  }}
-                                  className="absolute w-1 bg-emerald-400/50 rounded-t"
-                                />
-                              )
-                            )}
+                          <div className="absolute inset-x-0 bottom-0.5 flex items-end h-2 pointer-events-none opacity-65">
                             {clip.beatMarkers &&
                               clip.beatMarkers
                                 .filter((bm) => bm < clip.duration)
@@ -651,16 +634,15 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                                     key={idx}
                                     style={{ left: `${bm * zoomPxPerSec}px` }}
                                     className="absolute bottom-0.5 w-1.5 h-1.5 rounded-full bg-amber-300 shadow-sm"
-                                    title={`Beat @ ${bm.toFixed(2)}s`}
                                   />
                                 ))}
                           </div>
                         )}
 
-                        {/* Right Trim Handle (touch-friendly 12px hitbox) */}
+                        {/* Right Trim Handle (touch-friendly 14px hitbox) */}
                         <div
                           onPointerDown={(e) => startClipDrag(e, clip, 'trim-right')}
-                          className="touch-none absolute right-0 top-0 bottom-0 w-3 bg-amber-400/80 opacity-60 sm:opacity-0 group-hover:opacity-100 cursor-ew-resize"
+                          className="touch-none absolute right-0 top-0 bottom-0 w-3.5 bg-amber-400/80 opacity-75 sm:opacity-0 group-hover:opacity-100 cursor-ew-resize"
                           title="Drag to Trim Out-Point"
                         />
                       </div>
@@ -673,7 +655,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
           {/* Vertical Playhead Line */}
           <div
-            style={{ left: `${160 + playheadTime * zoomPxPerSec}px` }}
+            style={{ left: `${TRACK_HEADER_WIDTH + playheadTime * zoomPxPerSec}px` }}
             className="pointer-events-none absolute top-0 bottom-0 z-30 w-0.5 bg-amber-400"
           >
             <div className="w-3 h-3 -ml-[5px] bg-amber-400 rotate-45 rounded-[2px] shadow" />

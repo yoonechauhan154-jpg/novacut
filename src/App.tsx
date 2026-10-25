@@ -1,40 +1,50 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
+  Diamond,
   Download,
   Film,
   FlipHorizontal,
   FlipVertical,
-  FolderPlus,
+  FolderOpen,
   Gauge,
   Globe,
+  Home,
+  Image as ImageIcon,
   Info,
-  KeyRound,
   Layers,
+  LayoutGrid,
+  Maximize2,
   Mic,
   MicOff,
+  MoreVertical,
   Music,
   Palette,
   Pause,
+  Pencil,
   Play,
   Plus,
+  RotateCcw,
   RotateCw,
   Scissors,
   Search,
+  Settings,
+  ShieldAlert,
   SkipBack,
   SkipForward,
   Sliders,
+  Smile,
   Sparkles,
   Subtitles,
   Trash2,
   Type,
   Upload,
-  Volume2,
   Wand2,
   X,
-  ChevronUp,
-  ChevronDown,
 } from 'lucide-react';
 import { SpecBlueprintView } from './components/SpecBlueprintView';
 import { TimelinePanel } from './components/TimelinePanel';
@@ -57,7 +67,9 @@ import {
   TRENDING_SEARCH_FINDINGS,
 } from './effects/effectsLibrary';
 import {
+  downloadFcpXml,
   downloadProjectJson,
+  downloadSrtSubtitles,
   FEATURE_IMPLEMENTATION_CHECKLIST,
   parseCubeLutFile,
 } from './export/exportEngine';
@@ -65,6 +77,9 @@ import { LanguageCode, SUPPORTED_LANGUAGES, t } from './i18n/translations';
 import {
   AspectRatioKey,
   BlendModeType,
+  ColorAdjustments,
+  ImportedMediaItem,
+  KeyframePoint,
   MaskShapeType,
   ProjectData,
   SpecDecisionForm,
@@ -73,117 +88,189 @@ import {
   TextAnimationType,
   TimelineClip,
   TrackType,
-  TransitionType,
   VideoEffectType,
   VoiceChangerPreset,
 } from './types/editor';
+import {
+  BUILD_ID,
+  exitAndroidApp,
+  isAndroidNativeApp,
+  registerHardwareBackButton,
+  saveAndShareFileOnDevice,
+} from './utils/androidBridge';
 import { renderProjectFrame } from './utils/canvasRenderer';
-import { isAndroidNativeApp, saveAndShareFileOnDevice } from './utils/androidBridge';
+import { inspectAndImportMediaFile } from './utils/mediaImporter';
+import {
+  deleteProjectFromStorage,
+  loadAllProjectsFromStorage,
+  loadMediaBlobFromIdb,
+  saveProjectToStorage,
+} from './utils/projectStorage';
 import { soundEngine } from './utils/soundEngine';
 
-type WorkspaceMode = 'editor' | 'templates' | 'projects' | 'spec';
-type ToolCategory =
-  | 'media'
-  | 'layers'
-  | 'effects'
-  | 'text'
+type AppScreen = 'home' | 'picker' | 'editor' | 'settings' | 'spec';
+type HomeBottomTab = 'home' | 'templates' | 'projects';
+
+export type BottomSheetToolId =
+  | 'edit'
   | 'audio'
-  | 'color'
-  | 'keyframes'
-  | 'speed';
+  | 'text'
+  | 'stickers'
+  | 'overlay'
+  | 'effects'
+  | 'transitions'
+  | 'filters'
+  | 'adjust'
+  | 'captions'
+  | 'canvas'
+  | 'speed'
+  | 'mask'
+  | 'keyframe';
 
 const ASPECT_RATIOS: AspectRatioKey[] = ['9:16', '16:9', '1:1', '4:5', '4:3', '21:9'];
 
 export function App() {
-  // 1. Language Switcher State (persisted in localStorage)
+  // 1. Language Switcher State — Default English ('en') on first launch with storage key clipnova_lang_v3
   const [lang, setLang] = useState<LanguageCode>(() => {
     try {
-      const saved = localStorage.getItem('clipnova_lang_v2') as LanguageCode | null;
+      const saved = localStorage.getItem('clipnova_lang_v3');
       if (saved === 'en' || saved === 'hi') return saved;
     } catch {
-      // ignore
+      // ignore localStorage read errors
     }
     return 'en';
   });
 
   useEffect(() => {
     try {
-      localStorage.setItem('clipnova_lang_v2', lang);
+      localStorage.setItem('clipnova_lang_v3', lang);
     } catch {
       // ignore
     }
   }, [lang]);
 
-  // Workspace & Tool State
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('editor');
-  const [activeTool, setActiveTool] = useState<ToolCategory>('layers');
+  // 2. Navigation & Screen State (Opens on HOME screen, never auto-opens demo project)
+  const [screen, setScreen] = useState<AppScreen>('home');
+  const [homeTab, setHomeTab] = useState<HomeBottomTab>('home');
+  const [activeSheetTool, setActiveSheetTool] = useState<BottomSheetToolId | null>(null);
 
-  // Accordion: only one tool-inspector section open at a time
-  const [accordionOpen, setAccordionOpen] = useState<string | null>('adjustment');
+  // Accordion state inside bottom sheet (only ONE group expanded at a time)
+  const [adjustAccordion, setAdjustAccordion] = useState<'basic' | 'color' | 'effects' | 'blend'>('basic');
+  const [editAccordion, setEditAccordion] = useState<'media' | 'transform' | 'smart'>('media');
+  const [audioAccordion, setAudioAccordion] = useState<'music' | 'voice' | 'fx'>('music');
 
-  const toggleAccordion = (id: string) => {
-    setAccordionOpen((prev) => (prev === id ? null : id));
-  };
-
-  // Toast Notification for Best-Effort / Demo Features & Actions
+  // Toast Notification Queue
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const triggerToast = (msgEn: string, msgHi?: string) => {
-    setToastMessage(lang === 'hi' && msgHi ? msgHi : msgEn);
-  };
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const triggerToast = useCallback(
+    (msgEn: string, msgHi?: string) => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      setToastMessage(lang === 'hi' && msgHi ? msgHi : msgEn);
+      toastTimerRef.current = setTimeout(() => {
+        setToastMessage(null);
+      }, 3600);
+    },
+    [lang]
+  );
+
+  // Global Pro Mode toggle (persisted in localStorage)
+  const [globalProUnlocked, setGlobalProUnlocked] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('clipnova_pro_v3') === 'true';
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
-    if (!toastMessage) return;
-    const timer = setTimeout(() => setToastMessage(null), 4200);
-    return () => clearTimeout(timer);
-  }, [toastMessage]);
-
-  // Project State + Unlimited Undo/Redo History
-  const [project, setProject] = useState<ProjectData>(() => {
     try {
-      const saved = localStorage.getItem('clipnova_active_project_v2');
-      if (saved) return JSON.parse(saved);
+      localStorage.setItem('clipnova_pro_v3', String(globalProUnlocked));
     } catch {
       // ignore
     }
-    return INITIAL_PROJECT;
-  });
+  }, [globalProUnlocked]);
 
+  // Saved Projects List (Loaded from IndexedDB + guarded localStorage fallback)
+  const [projects, setProjects] = useState<ProjectData[]>([]);
+  const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
+
+  // Active Project in Editor
+  const [project, setProject] = useState<ProjectData>(() => ({
+    id: `proj-empty-${Date.now()}`,
+    name: 'My Project',
+    aspectRatio: '9:16',
+    fps: 30,
+    resolution: '1080p',
+    updatedAt: new Date().toISOString(),
+    background: {
+      type: 'gradient',
+      solidColor: '#0F172A',
+      gradientFrom: '#0F172A',
+      gradientTo: '#1E293B',
+      blurAmount: 20,
+    },
+    watermarkEnabled: true,
+    isProUnlocked: false,
+    importedMedia: [],
+    clips: [],
+  }));
+
+  // 3-dot Menu, Rename, Delete Confirmation & Exit Confirmation Modals on Home
+  const [openMenuProjectId, setOpenMenuProjectId] = useState<string | null>(null);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [renameInputVal, setRenameInputVal] = useState<string>('');
+  const [deleteTargetProject, setDeleteTargetProject] = useState<ProjectData | null>(null);
+  const [showExitConfirmModal, setShowExitConfirmModal] = useState<boolean>(false);
+  const [isEditingHeaderTitle, setIsEditingHeaderTitle] = useState<boolean>(false);
+
+  // Full-Screen Media Picker State (for New Project OR adding clips)
+  const [pickerTab, setPickerTab] = useState<'device' | 'starter'>('device');
+  const [pickerPool, setPickerPool] = useState<ImportedMediaItem[]>([]);
+  const [pickerSelectedIds, setPickerSelectedIds] = useState<string[]>([]);
+  const [isImportingFiles, setIsImportingFiles] = useState<boolean>(false);
+
+  // One-time 3-step Onboarding State on first Editor open
+  const [onboardingStep, setOnboardingStep] = useState<number | null>(null);
+
+  // Undo / Redo History Stack for Active Project
   const [historyPast, setHistoryPast] = useState<ProjectData[]>([]);
   const [historyFuture, setHistoryFuture] = useState<ProjectData[]>([]);
 
-  // Drafts list
-  const [drafts, setDrafts] = useState<ProjectData[]>(() => {
-    try {
-      const saved = localStorage.getItem('clipnova_drafts_v2');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
-    return [INITIAL_PROJECT];
-  });
-
-  // Master Product Spec Form State
+  // Spec Blueprint Form State
   const [specForm, setSpecForm] = useState<SpecDecisionForm>(() => {
     try {
-      const saved = localStorage.getItem('clipnova_spec_form_v1');
-      if (saved) return JSON.parse(saved);
+      const saved = localStorage.getItem('clipnova_spec_form_v3');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
     } catch {
       // ignore
     }
     return INITIAL_SPEC_FORM;
   });
 
-  // Playback & Timeline State
-  const [selectedClipId, setSelectedClipId] = useState<string | null>('clip-adj-1');
-  const [playheadTime, setPlayheadTime] = useState<number>(2.0);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [zoomPxPerSec, setZoomPxPerSec] = useState<number>(65);
-  const [magneticSnap, setMagneticSnap] = useState<boolean>(true);
+  useEffect(() => {
+    try {
+      localStorage.setItem('clipnova_spec_form_v3', JSON.stringify(specForm));
+    } catch {
+      // ignore
+    }
+  }, [specForm]);
 
-  // Effects Panel Search & Filter State
+  // Playback & Timeline State
+  const [playheadTime, setPlayheadTime] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [zoomPxPerSec, setZoomPxPerSec] = useState<number>(64);
+  const [magneticSnap, setMagneticSnap] = useState<boolean>(true);
+  const [scrollToTimeTrigger, setScrollToTimeTrigger] = useState<{ time: number; seq: number } | null>(null);
+
+  // Effects Library Filter State
   const [effectSearch, setEffectSearch] = useState<string>('');
   const [effectCategory, setEffectCategory] = useState<
-    'All' | 'Trending' | 'Glitch & Digital' | 'Motion & Velocity' | 'Optical & Light' | 'Transitions'
+    'All' | 'Trending' | 'Glitch & Digital' | 'Motion & Velocity' | 'Optical & Light'
   >('All');
   const [showTrendFindings, setShowTrendFindings] = useState<boolean>(false);
 
@@ -194,9 +281,9 @@ export function App() {
   const [isRecordingVoice, setIsRecordingVoice] = useState<boolean>(false);
   const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
   const [ttsInputText, setTtsInputText] = useState<string>(
-    'नमस्ते क्रिएटर्स! ClipNova में आपका स्वागत है।'
+    'Welcome to ClipNova Studio! Edit reels fast.'
   );
-  const [ttsVoiceLang, setTtsVoiceLang] = useState<'hi-IN' | 'en-IN' | 'en-US'>('hi-IN');
+  const [ttsVoiceLang, setTtsVoiceLang] = useState<'hi-IN' | 'en-IN' | 'en-US'>('en-IN');
 
   // Export & Checklist Modal State
   const [showExportModal, setShowExportModal] = useState<boolean>(false);
@@ -206,53 +293,272 @@ export function App() {
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
 
-  // Refs for Canvas & Media Elements
+  // Refs for Canvas, Media Elements, Active Export Cancellation & RAF Slider Throttling
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaElementsRef = useRef<Map<string, HTMLVideoElement | HTMLImageElement>>(new Map());
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const pickerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const editorMediaInputRef = useRef<HTMLInputElement | null>(null);
+  const pipOverlayInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const lutInputRef = useRef<HTMLInputElement | null>(null);
+  const exportIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const exportRecorderRef = useRef<MediaRecorder | null>(null);
+  const exportCancelledRef = useRef<boolean>(false);
+  const sliderRafRef = useRef<number | null>(null);
 
+  // Load saved projects from IndexedDB/localStorage on launch
+  useEffect(() => {
+    let mounted = true;
+    loadAllProjectsFromStorage((warnMsg) => {
+      if (mounted) triggerToast(warnMsg);
+    }).then((loaded) => {
+      if (!mounted) return;
+      setProjects(loaded);
+      setProjectsLoaded(true);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [triggerToast]);
+
+  // Calculate total timeline duration
   const totalDuration = Math.max(
-    4,
+    3,
     ...project.clips.map((c) => Number((c.startTime + c.duration).toFixed(2)))
   );
 
   const selectedClip = project.clips.find((c) => c.id === selectedClipId) || null;
 
-  // Auto-save project & drafts
-  useEffect(() => {
+  // Capture a small thumbnail from canvas when saving project
+  const captureCanvasThumbnail = useCallback((): string | undefined => {
     try {
-      localStorage.setItem('clipnova_active_project_v2', JSON.stringify(project));
-      setDrafts((prev) => {
-        const exists = prev.some((d) => d.id === project.id);
-        const updated = exists
-          ? prev.map((d) => (d.id === project.id ? project : d))
-          : [project, ...prev];
-        localStorage.setItem('clipnova_drafts_v2', JSON.stringify(updated));
-        return updated;
+      if (!canvasRef.current) return project.thumbnailUrl;
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = 160;
+      thumbCanvas.height = 284;
+      const tCtx = thumbCanvas.getContext('2d');
+      if (!tCtx) return project.thumbnailUrl;
+      tCtx.drawImage(canvasRef.current, 0, 0, 160, 284);
+      return thumbCanvas.toDataURL('image/jpeg', 0.65);
+    } catch {
+      return project.thumbnailUrl;
+    }
+  }, [project.thumbnailUrl]);
+
+  // Save current project to IndexedDB + state list
+  const persistCurrentProject = useCallback(
+    async (projToSave: ProjectData, withCanvasThumb: boolean = false) => {
+      const thumb =
+        withCanvasThumb
+          ? captureCanvasThumbnail() ||
+            projToSave.clips.find((c) => c.thumbnailUrl)?.thumbnailUrl
+          : projToSave.thumbnailUrl ||
+            projToSave.clips.find((c) => c.thumbnailUrl)?.thumbnailUrl;
+
+      const updated: ProjectData = {
+        ...projToSave,
+        thumbnailUrl: thumb,
+        updatedAt: new Date().toISOString(),
+      };
+
+      await saveProjectToStorage(updated);
+      setProjects((prev) => {
+        const exists = prev.some((p) => p.id === updated.id);
+        return exists
+          ? prev.map((p) => (p.id === updated.id ? updated : p))
+          : [updated, ...prev];
       });
-    } catch {
-      // ignore
-    }
-  }, [project]);
+    },
+    [captureCanvasThumbnail]
+  );
 
+  // Auto-save whenever project changes while inside Editor
   useEffect(() => {
-    try {
-      localStorage.setItem('clipnova_spec_form_v1', JSON.stringify(specForm));
-    } catch {
-      // ignore
-    }
-  }, [specForm]);
+    if (screen !== 'editor') return;
+    const timer = setTimeout(() => {
+      persistCurrentProject(project, false);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [project, screen, persistCurrentProject]);
 
-  const updateProjectWithHistory = (updater: (prev: ProjectData) => ProjectData) => {
+  // Restore media blobs from IndexedDB and build HTMLVideoElement / HTMLImageElement cache for Canvas
+  useEffect(() => {
+    let active = true;
+
+    const syncMediaCache = async () => {
+      for (const clip of project.clips) {
+        if (
+          (clip.sourceType === 'uploaded-video' || clip.sourceType === 'uploaded-image') &&
+          !mediaElementsRef.current.has(clip.id)
+        ) {
+          let url = clip.mediaUrl;
+          if (clip.mediaBlobId) {
+            const blob = await loadMediaBlobFromIdb(clip.mediaBlobId);
+            if (blob && active) {
+              url = URL.createObjectURL(blob);
+            }
+          }
+          if (!url || !active) continue;
+
+          if (clip.sourceType === 'uploaded-video') {
+            const vid = document.createElement('video');
+            vid.src = url;
+            vid.muted = true;
+            vid.playsInline = true;
+            vid.setAttribute('playsinline', 'true');
+            vid.preload = 'auto';
+            vid.load();
+            mediaElementsRef.current.set(clip.id, vid);
+          } else {
+            const img = new Image();
+            img.src = url;
+            mediaElementsRef.current.set(clip.id, img);
+          }
+        }
+      }
+    };
+
+    syncMediaCache();
+    return () => {
+      active = false;
+    };
+  }, [project.clips]);
+
+  // Register Hardware Back Button on Android (panel closed -> editor -> Home -> exit confirmation)
+  useEffect(() => {
+    const cleanup = registerHardwareBackButton(() => {
+      if (showExportModal) {
+        if (!isExportingVideo) setShowExportModal(false);
+        return;
+      }
+      if (showChecklistModal) {
+        setShowChecklistModal(false);
+        return;
+      }
+      if (deleteTargetProject) {
+        setDeleteTargetProject(null);
+        return;
+      }
+      if (showExitConfirmModal) {
+        setShowExitConfirmModal(false);
+        return;
+      }
+      if (screen === 'editor') {
+        if (activeSheetTool !== null) {
+          setActiveSheetTool(null);
+          return;
+        }
+        setIsPlaying(false);
+        persistCurrentProject(project, true);
+        setScreen('home');
+        return;
+      }
+      if (screen === 'picker' || screen === 'settings' || screen === 'spec') {
+        setScreen('home');
+        return;
+      }
+      if (screen === 'home') {
+        setShowExitConfirmModal(true);
+      }
+    });
+    return cleanup;
+  }, [
+    screen,
+    activeSheetTool,
+    showExportModal,
+    isExportingVideo,
+    showChecklistModal,
+    deleteTargetProject,
+    showExitConfirmModal,
+    project,
+    persistCurrentProject,
+  ]);
+
+  // Voiceover recording timer
+  useEffect(() => {
+    if (!isRecordingVoice) {
+      setRecordingSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setRecordingSeconds((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isRecordingVoice]);
+
+  // Playback loop (60fps RAF)
+  useEffect(() => {
+    if (!isPlaying || screen !== 'editor') return;
+    let animId: number;
+    let lastTs = performance.now();
+
+    const step = (now: number) => {
+      const dt = (now - lastTs) / 1000;
+      lastTs = now;
+
+      setPlayheadTime((prev) => {
+        const next = prev + dt;
+        if (next >= totalDuration) {
+          setIsPlaying(false);
+          return 0;
+        }
+        return next;
+      });
+      animId = requestAnimationFrame(step);
+    };
+
+    animId = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, totalDuration, screen]);
+
+  // Render Canvas Frame & Trigger Web Audio Synth Beats
+  // Uses 540p preview resolution while playing on mid-range phones, and full resolution on export
+  useEffect(() => {
+    if (screen !== 'editor') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const qualityMode = isExportingVideo ? 'export-full' : 'preview-540p';
+    renderProjectFrame(ctx, project, playheadTime, mediaElementsRef.current, qualityMode);
+    soundEngine.triggerTimelineAudioTick(playheadTime, project.clips, isPlaying);
+  }, [project, playheadTime, isPlaying, isExportingVideo, screen]);
+
+  // History-aware project updater
+  const updateProjectWithHistory = useCallback((updater: (prev: ProjectData) => ProjectData) => {
     setProject((prev) => {
       const next = updater(prev);
-      setHistoryPast((h) => [...h.slice(-45), prev]);
+      setHistoryPast((h) => [...h.slice(-40), prev]);
       setHistoryFuture([]);
       return { ...next, updatedAt: new Date().toISOString() };
     });
-  };
+  }, []);
+
+  // RAF-throttled clip property updater for smooth 60fps slider dragging on phone
+  const updateSelectedClip = useCallback(
+    (patch: Partial<TimelineClip>, throttleWithRaf: boolean = false) => {
+      if (!selectedClipId) return;
+      const applyUpdate = () => {
+        setProject((prev) => ({
+          ...prev,
+          updatedAt: new Date().toISOString(),
+          clips: prev.clips.map((c) => (c.id === selectedClipId ? { ...c, ...patch } : c)),
+        }));
+      };
+
+      if (throttleWithRaf) {
+        if (sliderRafRef.current) cancelAnimationFrame(sliderRafRef.current);
+        sliderRafRef.current = requestAnimationFrame(applyUpdate);
+      } else {
+        updateProjectWithHistory((prev) => ({
+          ...prev,
+          clips: prev.clips.map((c) => (c.id === selectedClipId ? { ...c, ...patch } : c)),
+        }));
+      }
+    },
+    [selectedClipId, updateProjectWithHistory]
+  );
 
   const handleUndo = () => {
     if (historyPast.length === 0) return;
@@ -270,139 +576,261 @@ export function App() {
     setProject(next);
   };
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  // Check if first-time onboarding should show when entering Editor
+  const openEditorWithProject = (proj: ProjectData) => {
+    setProject(proj);
+    setHistoryPast([]);
+    setHistoryFuture([]);
+    setPlayheadTime(0);
+    setIsPlaying(false);
+    setActiveSheetTool(null);
+    setSelectedClipId(proj.clips[0]?.id || null);
+    setScreen('editor');
 
-      if (e.code === 'Space') {
-        e.preventDefault();
-        setIsPlaying((p) => !p);
-      } else if (e.key === 's' || e.key === 'S') {
-        e.preventDefault();
-        handleSplitAtPlayhead();
-      } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedClipId) {
-          e.preventDefault();
-          handleDeleteSelected();
-        }
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) handleRedo();
-        else handleUndo();
+    try {
+      const done = localStorage.getItem('clipnova_onboarding_done_v3');
+      if (!done) {
+        setOnboardingStep(1);
       }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  });
-
-  // Playback loop
-  useEffect(() => {
-    if (!isPlaying) {
-      soundEngine.triggerTimelineAudioTick(playheadTime, project.clips, false);
-      return;
+    } catch {
+      // ignore
     }
-
-    let animationFrameId: number;
-    let lastTimestamp = performance.now();
-
-    const tick = (now: number) => {
-      const dt = (now - lastTimestamp) / 1000;
-      lastTimestamp = now;
-
-      setPlayheadTime((prevTime) => {
-        const nextTime = prevTime + dt;
-        if (nextTime >= totalDuration) {
-          setIsPlaying(false);
-          return 0;
-        }
-        soundEngine.triggerTimelineAudioTick(nextTime, project.clips, true);
-        return nextTime;
-      });
-
-      animationFrameId = requestAnimationFrame(tick);
-    };
-
-    animationFrameId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying, totalDuration, project.clips]);
-
-  // Render Canvas whenever playheadTime or project changes
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    renderProjectFrame(ctx, project, playheadTime, mediaElementsRef.current);
-
-    // If drawing custom mask, overlay the polygon vertices on preview
-    if (isDrawingCustomMask && selectedClip?.customMaskPoints?.length) {
-      const pts = selectedClip.customMaskPoints;
-      const w = canvas.width;
-      const h = canvas.height;
-      ctx.save();
-      ctx.strokeStyle = '#F59E0B';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      pts.forEach((p, idx) => {
-        if (idx === 0) ctx.moveTo(p.x * w, p.y * h);
-        else ctx.lineTo(p.x * w, p.y * h);
-      });
-      if (pts.length >= 3) ctx.closePath();
-      ctx.stroke();
-      pts.forEach((p) => {
-        ctx.fillStyle = '#FDE047';
-        ctx.beginPath();
-        ctx.arc(p.x * w, p.y * h, 6, 0, Math.PI * 2);
-        ctx.fill();
-      });
-      ctx.restore();
-    }
-  }, [project, playheadTime, workspaceMode, isDrawingCustomMask, selectedClip]);
-
-  // Voiceover timer
-  useEffect(() => {
-    if (!isRecordingVoice) {
-      setRecordingSeconds(0);
-      return;
-    }
-    const interval = setInterval(() => {
-      setRecordingSeconds((s) => Number((s + 0.1).toFixed(1)));
-    }, 100);
-    return () => clearInterval(interval);
-  }, [isRecordingVoice]);
-
-  const updateSelectedClip = (patch: Partial<TimelineClip>) => {
-    if (!selectedClipId) return;
-    updateProjectWithHistory((prev) => ({
-      ...prev,
-      clips: prev.clips.map((c) => (c.id === selectedClipId ? { ...c, ...patch } : c)),
-    }));
   };
 
-  // ===========================================================================
-  // REQUIREMENT 2: CREATE NON-DESTRUCTIVE ADJUSTMENT & EFFECT OVERLAY LAYERS
-  // ===========================================================================
+  // ============================================================================
+  // NEW PROJECT & MEDIA PICKER FLOW (Section A.2, A.3 & Section D)
+  // ============================================================================
+  const handleStartNewProject = () => {
+    setPickerPool([]);
+    setPickerSelectedIds([]);
+    setPickerTab('device');
+    setScreen('picker');
+    // Prompt phone gallery picker after transition
+    setTimeout(() => {
+      pickerFileInputRef.current?.click();
+    }, 120);
+  };
+
+  const handlePickerFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setIsImportingFiles(true);
+    const newItems: ImportedMediaItem[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const item = await inspectAndImportMediaFile(files[i], {
+          onStepToast: triggerToast,
+        });
+        newItems.push(item);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        triggerToast(`Import error: ${msg}`, `इंपोर्ट त्रुटि: ${msg}`);
+      }
+    }
+
+    setPickerPool((prev) => [...prev, ...newItems]);
+    setPickerSelectedIds((prev) => [...prev, ...newItems.map((it) => it.id)]);
+    setIsImportingFiles(false);
+    e.target.value = '';
+  };
+
+  const togglePickerItemSelection = (id: string) => {
+    setPickerSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleConfirmMediaPickerAdd = async () => {
+    // Gather selected items in exact numbered order
+    const starterPool: ImportedMediaItem[] = STARTER_MEDIA_LIBRARY.map((s) => ({
+      id: s.id,
+      name: lang === 'hi' ? s.titleHi : s.title,
+      kind: 'procedural',
+      duration: s.duration,
+      scenePreset: s.scenePreset,
+      createdAt: new Date().toISOString(),
+    }));
+    const allAvailable = [...pickerPool, ...starterPool];
+    const orderedItems = pickerSelectedIds
+      .map((id) => allAvailable.find((it) => it.id === id))
+      .filter((it): it is ImportedMediaItem => Boolean(it));
+
+    if (orderedItems.length === 0) {
+      triggerToast(
+        'Please select at least 1 video or photo to start.',
+        'शुरू करने के लिए कम से कम 1 वीडियो या फ़ोटो चुनें।'
+      );
+      return;
+    }
+
+    // Build sequential clips on the Main Video track ONLY (Timeline starts empty except for selected clips!)
+    let cursorTime = 0;
+    const initialClips: TimelineClip[] = orderedItems.map((item, idx) => {
+      const clipId = `clip-main-${Date.now()}-${idx}`;
+      const clip = createBaseClip({
+        id: clipId,
+        trackId: 'track-video-main',
+        trackType: item.kind === 'audio' ? 'audio' : 'video',
+        title: item.name,
+        startTime: Number(cursorTime.toFixed(2)),
+        duration: item.duration,
+        sourceType:
+          item.kind === 'video'
+            ? 'uploaded-video'
+            : item.kind === 'image'
+            ? 'uploaded-image'
+            : item.kind === 'audio'
+            ? 'uploaded-audio'
+            : 'procedural-scene',
+        scenePreset: item.scenePreset || 'mumbai-drive',
+        mediaUrl: item.mediaUrl,
+        mediaBlobId: item.mediaBlobId,
+        thumbnailUrl: item.thumbnailUrl,
+      });
+      cursorTime += item.duration;
+      return clip;
+    });
+
+    const newProj: ProjectData = {
+      id: `proj-${Date.now()}`,
+      name: `Project ${projects.length + 1}`,
+      aspectRatio: '9:16',
+      fps: 30,
+      resolution: '1080p',
+      updatedAt: new Date().toISOString(),
+      thumbnailUrl: orderedItems.find((i) => i.thumbnailUrl)?.thumbnailUrl,
+      background: {
+        type: 'gradient',
+        solidColor: '#0F172A',
+        gradientFrom: '#0F172A',
+        gradientTo: '#1E293B',
+        blurAmount: 20,
+      },
+      watermarkEnabled: !globalProUnlocked,
+      isProUnlocked: globalProUnlocked,
+      importedMedia: orderedItems,
+      clips: initialClips,
+    };
+
+    await saveProjectToStorage(newProj);
+    setProjects((prev) => [newProj, ...prev]);
+    triggerToast(
+      `Clip added: ${initialClips.length} item(s) placed on Main Video track`,
+      `मेन वीडियो ट्रैक पर ${initialClips.length} क्लिप जोड़ी गईं`
+    );
+    openEditorWithProject(newProj);
+  };
+
+  // Import media directly inside Editor (appends to Media panel, Main Video/PIP/Audio track, and scrolls timeline)
+  const handleEditorDirectFileImport = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    targetTrack: 'video' | 'overlay' | 'audio'
+  ) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    let endCursor = project.clips
+      .filter((c) => c.trackType === targetTrack)
+      .reduce((max, c) => Math.max(max, c.startTime + c.duration), 0);
+
+    if (targetTrack === 'overlay') {
+      endCursor = playheadTime;
+    }
+
+    const newClips: TimelineClip[] = [];
+    const newMediaItems: ImportedMediaItem[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const item = await inspectAndImportMediaFile(files[i], {
+          onStepToast: triggerToast,
+        });
+        newMediaItems.push(item);
+
+        const actualTrack: TrackType =
+          item.kind === 'audio' ? 'audio' : targetTrack;
+        const clipStart = Number(endCursor.toFixed(2));
+        const clipId = `clip-${actualTrack}-${Date.now()}-${i}`;
+
+        const newClip = createBaseClip({
+          id: clipId,
+          trackId: `track-${actualTrack}`,
+          trackType: actualTrack,
+          title: item.name,
+          startTime: clipStart,
+          duration: item.duration,
+          sourceType:
+            item.kind === 'video'
+              ? 'uploaded-video'
+              : item.kind === 'image'
+              ? 'uploaded-image'
+              : 'uploaded-audio',
+          mediaUrl: item.mediaUrl,
+          mediaBlobId: item.mediaBlobId,
+          thumbnailUrl: item.thumbnailUrl,
+          scale: actualTrack === 'overlay' ? 0.45 : 1,
+          beatMarkers:
+            actualTrack === 'audio'
+              ? soundEngine.generateAutoBeatMarkers(item.duration, 104)
+              : undefined,
+        });
+
+        newClips.push(newClip);
+        endCursor += item.duration;
+        triggerToast(
+          `Clip added: "${item.name}" at ${clipStart.toFixed(1)}s`,
+          `क्लिप जोड़ी गई: "${item.name}" (${clipStart.toFixed(1)}s पर)`
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        triggerToast(`Import failed: ${msg}`, `इंपोर्ट विफल: ${msg}`);
+      }
+    }
+
+    if (newClips.length > 0) {
+      const lastClip = newClips[newClips.length - 1];
+      updateProjectWithHistory((prev) => ({
+        ...prev,
+        importedMedia: [...(prev.importedMedia || []), ...newMediaItems],
+        clips: [...prev.clips, ...newClips],
+      }));
+      setSelectedClipId(lastClip.id);
+      setPlayheadTime(lastClip.startTime);
+      setScrollToTimeTrigger({ time: lastClip.startTime, seq: Date.now() });
+    }
+
+    e.target.value = '';
+  };
+
+  // ============================================================================
+  // NON-DESTRUCTIVE ADJUSTMENT LAYER & EFFECT OVERLAY LAYER CREATORS
+  // ============================================================================
   const handleCreateAdjustmentLayer = () => {
-    const newId = `adj-${Date.now()}`;
+    const newId = `adj-layer-${Date.now()}`;
+    const start = Number(playheadTime.toFixed(2));
+    const dur = Math.min(4.0, Math.max(2.0, totalDuration - start));
+
     const newLayer = createBaseClip({
       id: newId,
       trackId: 'track-adjustment',
       trackType: 'adjustment',
-      title: `Adjustment Layer #${project.clips.filter((c) => c.trackType === 'adjustment').length + 1}`,
-      titleHi: `एडजस्टमेंट लेयर #${project.clips.filter((c) => c.trackType === 'adjustment').length + 1}`,
-      startTime: Number(playheadTime.toFixed(2)),
-      duration: 4.0,
+      title: `Adjustment Layer #${
+        project.clips.filter((c) => c.trackType === 'adjustment').length + 1
+      }`,
+      titleHi: `एडजस्टमेंट लेयर #${
+        project.clips.filter((c) => c.trackType === 'adjustment').length + 1
+      }`,
+      startTime: start,
+      duration: dur,
       sourceType: 'adjustment-layer',
       blendMode: 'source-over',
       opacity: 1,
       adjustments: {
         ...DEFAULT_ADJUSTMENTS,
-        contrast: 14,
-        saturation: 22,
-        temperature: 18,
-        vignette: 25,
+        contrast: 12,
+        saturation: 16,
+        temperature: 10,
       },
     });
 
@@ -411,31 +839,36 @@ export function App() {
       clips: [...prev.clips, newLayer],
     }));
     setSelectedClipId(newId);
-    setActiveTool('layers');
+    setScrollToTimeTrigger({ time: start, seq: Date.now() });
     triggerToast(
-      'Created non-destructive Adjustment Layer. It grades all tracks below it without modifying your original video.',
-      'नॉन-डिस्ट्रक्टिव एडजस्टमेंट लेयर बनाई गई! यह मूल वीडियो को बदले बिना नीचे के सभी ट्रैक्स पर लागू होती है।'
+      'Created Non-Destructive Adjustment Layer.',
+      'नॉन-डिस्ट्रक्टिव एडजस्टमेंट लेयर बनाई गई।'
     );
   };
 
   const handleCreateEffectLayer = (
-    effectType: VideoEffectType = 'light-leak',
-    startAtTime: number = playheadTime
+    effect: VideoEffectType = 'light-leak',
+    startTimeOverride?: number
   ) => {
-    const catalogItem = EFFECTS_CATALOG.find((e) => e.id === effectType);
-    const newId = `fxlayer-${Date.now()}`;
+    const newId = `fx-layer-${Date.now()}`;
+    const start = Number(
+      (startTimeOverride !== undefined ? startTimeOverride : playheadTime).toFixed(2)
+    );
+    const fxMeta = EFFECTS_CATALOG.find((e) => e.id === effect);
+    const dur = 3.0;
+
     const newLayer = createBaseClip({
       id: newId,
       trackId: 'track-effect-layer',
       trackType: 'effect-layer',
-      title: `${catalogItem?.nameEn || effectType} Layer`,
-      titleHi: `${catalogItem?.nameHi || effectType} लेयर`,
-      startTime: Number(startAtTime.toFixed(2)),
-      duration: 3.2,
+      title: `${fxMeta?.nameEn || effect} FX Layer`,
+      titleHi: `${fxMeta?.nameHi || effect} इफेक्ट लेयर`,
+      startTime: start,
+      duration: dur,
       sourceType: 'effect-layer',
-      effect: effectType,
-      effectIntensity: catalogItem?.defaultIntensity ?? 80,
-      blendMode: effectType === 'light-leak' || effectType === 'glow' ? 'screen' : 'source-over',
+      effect,
+      effectIntensity: fxMeta?.defaultIntensity || 80,
+      blendMode: effect === 'light-leak' || effect === 'glow' ? 'screen' : 'source-over',
     });
 
     updateProjectWithHistory((prev) => ({
@@ -443,131 +876,95 @@ export function App() {
       clips: [...prev.clips, newLayer],
     }));
     setSelectedClipId(newId);
-    setActiveTool('layers');
+    setScrollToTimeTrigger({ time: start, seq: Date.now() });
     triggerToast(
-      `Added "${catalogItem?.nameEn || effectType}" Effect Overlay Layer on timeline.`,
-      `टाइमलाइन पर "${catalogItem?.nameHi || effectType}" इफेक्ट ओवरले लेयर जोड़ी गई।`
+      `Added "${fxMeta?.nameEn || effect}" Effect Overlay Layer.`,
+      `"${fxMeta?.nameHi || effect}" इफेक्ट ओवरले लेयर टाइमलाइन पर जोड़ी गई।`
     );
   };
 
-  // Auto-Cut Main Video to Audio Beat Markers
-  const handleAutoBeatCut = () => {
-    const audioClip = project.clips.find((c) => c.trackType === 'audio' && c.beatMarkers?.length);
-    if (!audioClip || !audioClip.beatMarkers) {
-      triggerToast(
-        'Add an audio track with beat markers first.',
-        'पहले बीट मार्क वाला ऑडियो ट्रैक जोड़ें।'
-      );
-      return;
-    }
-
-    // Take every 4th beat marker to create clean rhythmic cuts on Main Video clips
-    const cutTimes = audioClip.beatMarkers
-      .filter((_, idx) => idx % 3 === 2)
-      .map((bm) => Number((audioClip.startTime + bm).toFixed(2)));
-
-    updateProjectWithHistory((prev) => {
-      let updatedClips = [...prev.clips];
-      for (const ct of cutTimes) {
-        const target = updatedClips.find(
-          (c) =>
-            c.trackType === 'video' && ct > c.startTime + 0.5 && ct < c.startTime + c.duration - 0.5
-        );
-        if (target) {
-          const firstDur = Number((ct - target.startTime).toFixed(2));
-          const secondDur = Number((target.duration - firstDur).toFixed(2));
-          const firstClip: TimelineClip = {
-            ...target,
-            duration: firstDur,
-            outPoint: target.inPoint + firstDur,
-          };
-          const secondClip: TimelineClip = {
-            ...target,
-            id: `beatcut-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            title: `${target.title} (Beat)`,
-            startTime: ct,
-            duration: secondDur,
-            inPoint: target.inPoint + firstDur,
-            transitionIn: 'flash',
-            transitionDuration: 0.3,
-          };
-          updatedClips = updatedClips.flatMap((c) =>
-            c.id === target.id ? [firstClip, secondClip] : [c]
-          );
-        }
-      }
-      return { ...prev, clips: updatedClips };
-    });
-
-    triggerToast(
-      'Auto-Cut to Beat complete! Main video split at beat markers with flash transitions.',
-      'बीट-सिंक ऑटो-कट पूरा हुआ! ऑडियो बीट्स पर वीडियो स्प्लिट और फ्लैश ट्रांज़िशन लगाए गए।'
-    );
+  // ============================================================================
+  // TIMELINE EDITING OPERATIONS
+  // ============================================================================
+  const handleUpdateClipTiming = (clipId: string, newStartTime: number, newDuration: number) => {
+    setProject((prev) => ({
+      ...prev,
+      clips: prev.clips.map((c) =>
+        c.id === clipId
+          ? { ...c, startTime: newStartTime, duration: newDuration, outPoint: newDuration }
+          : c
+      ),
+    }));
   };
 
-  // Standard Timeline Operations
   const handleSplitAtPlayhead = () => {
     if (!selectedClip) return;
-    if (
-      playheadTime <= selectedClip.startTime + 0.25 ||
-      playheadTime >= selectedClip.startTime + selectedClip.duration - 0.25
-    ) {
+    const offset = playheadTime - selectedClip.startTime;
+    if (offset <= 0.25 || offset >= selectedClip.duration - 0.25) {
       triggerToast(
-        'Move playhead inside the selected clip to split it.',
+        'Move playhead inside the selected clip to split.',
         'क्लिप को काटने (Split) के लिए प्लेहेड को क्लिप के बीच में रखें।'
       );
       return;
     }
-    const firstDur = Number((playheadTime - selectedClip.startTime).toFixed(2));
-    const secondDur = Number((selectedClip.duration - firstDur).toFixed(2));
-    const secondId = `clip-${Date.now()}`;
+
+    const firstHalfDur = Number(offset.toFixed(2));
+    const secondHalfDur = Number((selectedClip.duration - firstHalfDur).toFixed(2));
+    const secondId = `${selectedClip.id}-split-${Date.now()}`;
 
     const firstClip: TimelineClip = {
       ...selectedClip,
-      duration: firstDur,
-      outPoint: selectedClip.inPoint + firstDur,
+      duration: firstHalfDur,
+      outPoint: selectedClip.inPoint + firstHalfDur,
     };
+
     const secondClip: TimelineClip = {
       ...selectedClip,
       id: secondId,
       title: `${selectedClip.title} (2)`,
-      startTime: Number(playheadTime.toFixed(2)),
-      duration: secondDur,
-      inPoint: selectedClip.inPoint + firstDur,
+      startTime: Number((selectedClip.startTime + firstHalfDur).toFixed(2)),
+      duration: secondHalfDur,
+      inPoint: selectedClip.inPoint + firstHalfDur,
     };
+
+    if (mediaElementsRef.current.has(selectedClip.id)) {
+      const existingEl = mediaElementsRef.current.get(selectedClip.id)!;
+      mediaElementsRef.current.set(secondId, existingEl);
+    }
 
     updateProjectWithHistory((prev) => ({
       ...prev,
-      clips: prev.clips.flatMap((c) =>
-        c.id === selectedClip.id ? [firstClip, secondClip] : [c]
-      ),
+      clips: prev.clips.flatMap((c) => (c.id === selectedClip.id ? [firstClip, secondClip] : [c])),
     }));
     setSelectedClipId(secondId);
   };
 
   const handleDuplicateSelected = () => {
     if (!selectedClip) return;
-    const newId = `clip-${Date.now()}`;
-    const copyClip: TimelineClip = {
+    const dupId = `${selectedClip.id}-dup-${Date.now()}`;
+    const dupClip: TimelineClip = {
       ...selectedClip,
-      id: newId,
-      title: `${selectedClip.title} Copy`,
+      id: dupId,
+      title: `${selectedClip.title} (Copy)`,
       startTime: Number((selectedClip.startTime + selectedClip.duration).toFixed(2)),
     };
+    if (mediaElementsRef.current.has(selectedClip.id)) {
+      mediaElementsRef.current.set(dupId, mediaElementsRef.current.get(selectedClip.id)!);
+    }
     updateProjectWithHistory((prev) => ({
       ...prev,
-      clips: [...prev.clips, copyClip],
+      clips: [...prev.clips, dupClip],
     }));
-    setSelectedClipId(newId);
+    setSelectedClipId(dupId);
   };
 
   const handleDeleteSelected = () => {
-    if (!selectedClipId) return;
-    updateProjectWithHistory((prev) => ({
-      ...prev,
-      clips: prev.clips.filter((c) => c.id !== selectedClipId),
-    }));
-    setSelectedClipId(null);
+    if (!selectedClip) return;
+    updateProjectWithHistory((prev) => {
+      const remaining = prev.clips.filter((c) => c.id !== selectedClip.id);
+      setSelectedClipId(remaining[0]?.id || null);
+      return { ...prev, clips: remaining };
+    });
   };
 
   const handleToggleReverseSelected = () => {
@@ -582,16 +979,15 @@ export function App() {
 
   const handleAddKeyframeAtPlayhead = () => {
     if (!selectedClip) return;
-    const offset = Math.max(
-      0,
-      Math.min(
-        selectedClip.duration,
-        Number((playheadTime - selectedClip.startTime).toFixed(2))
-      )
+    const relOffset = Number(
+      Math.max(
+        0,
+        Math.min(selectedClip.duration, playheadTime - selectedClip.startTime)
+      ).toFixed(2)
     );
-    const newKf = {
+    const newKf: KeyframePoint = {
       id: `kf-${Date.now()}`,
-      timeOffset: offset,
+      timeOffset: relOffset,
       scale: selectedClip.scale,
       x: selectedClip.posX,
       y: selectedClip.posY,
@@ -599,37 +995,70 @@ export function App() {
       opacity: selectedClip.opacity,
       effectIntensity: selectedClip.effectIntensity ?? 75,
       brightness: selectedClip.adjustments.brightness,
-      easing: 'ease-in-out' as const,
+      easing: 'ease-in-out',
     };
-    updateSelectedClip({
-      keyframes: [
-        ...selectedClip.keyframes.filter((k) => Math.abs(k.timeOffset - offset) > 0.1),
-        newKf,
-      ],
-    });
+    const filtered = selectedClip.keyframes.filter((k) => Math.abs(k.timeOffset - relOffset) > 0.12);
+    updateSelectedClip({ keyframes: [...filtered, newKf] });
     triggerToast(
-      `Added Keyframe (♦) at +${offset}s on "${selectedClip.title}".`,
-      `"${selectedClip.title}" पर +${offset}s समय पर नया कीफ्रेम (♦) जोड़ा गया।`
+      `Added Keyframe (◆) at +${relOffset}s`,
+      `+${relOffset}s पर कीफ्रेम (◆) जोड़ा गया`
     );
   };
 
-  const handleUpdateClipTiming = (
-    clipId: string,
-    newStartTime: number,
-    newDuration: number
-  ) => {
-    setProject((prev) => ({
-      ...prev,
-      clips: prev.clips.map((c) =>
-        c.id === clipId ? { ...c, startTime: newStartTime, duration: newDuration } : c
-      ),
-    }));
+  const handleAutoBeatCut = () => {
+    const audioClip = project.clips.find(
+      (c) => c.trackType === 'audio' && c.beatMarkers && c.beatMarkers.length > 0
+    );
+    if (!audioClip || !audioClip.beatMarkers) {
+      triggerToast('Add a music track with beat markers first.', 'पहले ऑडियो ट्रैक जोड़ें।');
+      return;
+    }
+
+    const beats = audioClip.beatMarkers;
+    updateProjectWithHistory((prev) => {
+      const nonVideoClips = prev.clips.filter((c) => c.trackType !== 'video');
+      const videoClips = prev.clips
+        .filter((c) => c.trackType === 'video')
+        .sort((a, b) => a.startTime - b.startTime);
+      if (videoClips.length === 0) return prev;
+
+      const splitResult: TimelineClip[] = [];
+      for (const vc of videoClips) {
+        const clipStart = vc.startTime;
+        const clipEnd = vc.startTime + vc.duration;
+        const internalBeats = beats.filter((b) => b > clipStart + 0.6 && b < clipEnd - 0.6);
+        if (internalBeats.length === 0) {
+          splitResult.push(vc);
+          continue;
+        }
+        const cutPoint = internalBeats[0];
+        const d1 = Number((cutPoint - clipStart).toFixed(2));
+        const d2 = Number((clipEnd - cutPoint).toFixed(2));
+        splitResult.push(
+          { ...vc, duration: d1, outPoint: d1 },
+          {
+            ...vc,
+            id: `${vc.id}-beat-${Date.now()}`,
+            startTime: cutPoint,
+            duration: d2,
+            transitionIn: 'flash',
+            transitionDuration: 0.3,
+          }
+        );
+      }
+      return { ...prev, clips: [...nonVideoClips, ...splitResult] };
+    });
+
+    triggerToast(
+      'Auto Beat-Cut synced Main Video clips to beat markers!',
+      'ऑटो बीट-कट द्वारा वीडियो क्लिप्स को म्यूज़िक बीट्स पर सिंक किया गया!'
+    );
   };
 
   const handleToggleTrackMute = (trackType: TrackType) => {
     updateProjectWithHistory((prev) => {
       const trackClips = prev.clips.filter((c) => c.trackType === trackType);
-      const allMuted = trackClips.every((c) => c.muted);
+      const allMuted = trackClips.length > 0 && trackClips.every((c) => c.muted);
       return {
         ...prev,
         clips: prev.clips.map((c) =>
@@ -639,190 +1068,26 @@ export function App() {
     });
   };
 
-  // Add Starter Scene
-  const handleAddStarterClip = (
-    item: (typeof STARTER_MEDIA_LIBRARY)[number],
-    targetTrack: 'video' | 'overlay'
-  ) => {
-    const existingOnTrack = project.clips.filter((c) => c.trackType === targetTrack);
-    const startAt =
-      targetTrack === 'video'
-        ? existingOnTrack.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0)
-        : Number(playheadTime.toFixed(2));
-
-    const newId = `clip-${Date.now()}`;
-    const newClip = createBaseClip({
-      id: newId,
-      trackId: targetTrack === 'video' ? 'track-video-main' : 'track-overlay-pip',
-      trackType: targetTrack,
-      title: item.title,
-      titleHi: item.titleHi,
-      startTime: Number(startAt.toFixed(2)),
-      duration: item.duration,
-      sourceType: 'procedural-scene',
-      scenePreset: item.scenePreset,
-      scale: targetTrack === 'overlay' ? 0.42 : 1,
-      posX: targetTrack === 'overlay' ? 25 : 0,
-      posY: targetTrack === 'overlay' ? -25 : 0,
-      maskShape: targetTrack === 'overlay' ? 'circle' : 'none',
-    });
-
-    updateProjectWithHistory((prev) => ({
-      ...prev,
-      clips: [...prev.clips, newClip],
-    }));
-    setSelectedClipId(newId);
-  };
-
-  // Gallery Upload
-  const handleGalleryFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    triggerToast(
-      lang === 'hi' ? 'फ़ाइल चुन ली गई है, मेटाडेटा पढ़ रहा है…' : 'File selected, reading metadata…'
-    );
-
-    Array.from(files).forEach(async (file, idx) => {
-      const url = URL.createObjectURL(file);
-      const isVideo = file.type.startsWith('video/');
-      const clipId = `upload-${Date.now()}-${idx}`;
-
-      let duration = 4.5; // fallback
-
-      if (isVideo) {
-        const videoEl = document.createElement('video');
-        videoEl.src = url;
-        videoEl.muted = true;
-        videoEl.playsInline = true;
-        videoEl.preload = 'metadata';
-        videoEl.crossOrigin = 'anonymous';
-        videoEl.style.display = 'none';
-        document.body.appendChild(videoEl);
-
-        videoEl.onloadedmetadata = () => {
-          duration = videoEl.duration || 4.5;
-          const existingMain = project.clips.filter((c) => c.trackType === 'video');
-          const startAt = existingMain.reduce(
-            (max, c) => Math.max(max, c.startTime + c.duration),
-            0
-          );
-
-          const newClip = createBaseClip({
-            id: clipId,
-            trackId: 'track-video-main',
-            trackType: 'video',
-            title: file.name.replace(/\.[^/.]+$/, ''),
-            startTime: Number(startAt.toFixed(2)),
-            duration: Number(duration.toFixed(2)),
-            sourceType: 'uploaded-video',
-            mediaUrl: url,
-          });
-
-          updateProjectWithHistory((prev) => ({
-            ...prev,
-            clips: [...prev.clips, newClip],
-          }));
-          setSelectedClipId(clipId);
-
-          triggerToast(
-            `Video imported: "${file.name}" (${duration.toFixed(2)}s) — added to Main Video track.`,
-            `वीडियो इम्पोर्ट हो गया: "${file.name}" — मेन वीडियो ट्रैक पर जोड़ा गया।`
-          );
-
-          // Clean up the temporary video element
-          URL.revokeObjectURL(url);
-          document.body.removeChild(videoEl);
-        };
-
-        videoEl.onerror = () => {
-          triggerToast(
-            `Failed to load video: ${file.name}`,
-            `वीडियो लोड करने में विफल: ${file.name}`
-          );
-          URL.revokeObjectURL(url);
-          document.body.removeChild(videoEl);
-        };
-
-        videoEl.load();
-      } else {
-        const imgEl = new Image();
-        imgEl.src = url;
-        imgEl.onload = () => {
-          mediaElementsRef.current.set(clipId, imgEl);
-
-          const existingMain = project.clips.filter((c) => c.trackType === 'video');
-          const startAt = existingMain.reduce(
-            (max, c) => Math.max(max, c.startTime + c.duration),
-            0
-          );
-
-          const newClip = createBaseClip({
-            id: clipId,
-            trackId: 'track-video-main',
-            trackType: 'video',
-            title: file.name.replace(/\.[^/.]+$/, ''),
-            startTime: Number(startAt.toFixed(2)),
-            duration: Number(duration.toFixed(2)),
-            sourceType: 'uploaded-image',
-            mediaUrl: url,
-          });
-
-          updateProjectWithHistory((prev) => ({
-            ...prev,
-            clips: [...prev.clips, newClip],
-          }));
-          setSelectedClipId(clipId);
-
-          triggerToast(
-            `Image imported: "${file.name}" — added to Main Video track.`,
-            `इमेज इम्पोर्ट हो गई: "${file.name}" — मेन वीडियो ट्रैक पर जोड़ा गया।`
-          );
-
-          URL.revokeObjectURL(url);
-        };
-        imgEl.onerror = () => {
-          triggerToast(
-            `Failed to load image: ${file.name}`,
-            `इमेज लोड करने में विफल: ${file.name}`
-          );
-          URL.revokeObjectURL(url);
-        };
-      }
-    });
-
-    e.target.value = '';
-  };
-
-  // .CUBE LUT File Upload
-  const handleLutFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLutFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedClip) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result || '');
-      const parsed = parseCubeLutFile(file.name, text);
-      updateSelectedClip({
-        adjustments: {
-          ...selectedClip.adjustments,
-          ...parsed,
-        },
-      });
-      triggerToast(
-        `Imported 3D LUT "${file.name}" onto "${selectedClip.title}".`,
-        `"${file.name}" LUT सफलतापूर्वक "${selectedClip.title}" पर लागू किया गया।`
-      );
-    };
-    reader.readAsText(file);
+    const text = await file.text();
+    const parsed = parseCubeLutFile(text, file.name);
+    updateSelectedClip({
+      adjustments: {
+        ...selectedClip.adjustments,
+        ...parsed.adjustmentsPatch,
+      },
+    });
+    triggerToast(
+      `Imported 3D LUT "${parsed.lutName}"`,
+      `3D LUT "${parsed.lutName}" लागू किया गया`
+    );
     e.target.value = '';
   };
 
-  // Text & Captions
-  const handleAddTextOverlay = (
-    presetText: string,
-    fontFam: string,
-    anim: TextAnimationType
-  ) => {
+  // Text, Auto-Captions & Stickers
+  const handleAddTextOverlay = (presetText: string, fontFam: string, anim: TextAnimationType) => {
     const newId = `txt-${Date.now()}`;
     const newClip = createBaseClip({
       id: newId,
@@ -830,7 +1095,7 @@ export function App() {
       trackType: 'text',
       title: presetText.slice(0, 18),
       startTime: Number(playheadTime.toFixed(2)),
-      duration: 3.5,
+      duration: 3.0,
       sourceType: 'text',
       textContent: presetText,
       fontFamily: fontFam,
@@ -860,7 +1125,7 @@ export function App() {
         id: `autocap-${Date.now()}-${i}`,
         trackId: 'track-text-captions',
         trackType: 'text',
-        title: `Auto Caption #${i + 1}`,
+        title: `Caption #${i + 1}`,
         startTime: line.start,
         duration: line.duration,
         sourceType: 'text',
@@ -884,8 +1149,8 @@ export function App() {
     }));
     if (generatedClips[0]) setSelectedClipId(generatedClips[0].id);
     triggerToast(
-      `Generated editable ${capLang.toUpperCase()} auto-captions with word highlighting.`,
-      `वर्ड-बाय-वर्ड हाइलाइट के साथ ${capLang.toUpperCase()} ऑटो-कैप्शन टाइमलाइन में जोड़े गए।`
+      `Generated ${capLang.toUpperCase()} karaoke auto-captions.`,
+      `${capLang.toUpperCase()} ऑटो-कैप्शन टाइमलाइन में जोड़े गए।`
     );
   };
 
@@ -933,6 +1198,7 @@ export function App() {
       clips: [...prev.clips.filter((c) => c.trackType !== 'audio'), newClip],
     }));
     setSelectedClipId(newId);
+    triggerToast(`Added music: ${track.title}`, `म्यूज़िक जोड़ा गया: ${track.titleHi}`);
   };
 
   const handleExtractAudioFromVideo = () => {
@@ -949,7 +1215,6 @@ export function App() {
       trackId: 'track-audio-main',
       trackType: 'audio',
       title: `Extracted: ${sourceVideo.title}`,
-      titleHi: `एक्सट्रैक्टेड ऑडियो: ${sourceVideo.titleHi || sourceVideo.title}`,
       startTime: sourceVideo.startTime,
       duration: sourceVideo.duration,
       sourceType: 'synth-audio',
@@ -963,22 +1228,21 @@ export function App() {
     }));
     setSelectedClipId(newId);
     triggerToast(
-      `Extracted audio stream and beat markers from "${sourceVideo.title}".`,
-      `"${sourceVideo.title}" से ऑडियो और बीट मार्क्स अलग ट्रैक में निकाले गए।`
+      `Extracted audio from "${sourceVideo.title}".`,
+      `"${sourceVideo.title}" से ऑडियो अलग ट्रैक में निकाला गया।`
     );
   };
 
   const handleSynthesizeTtsToTimeline = () => {
     if (!ttsInputText.trim()) return;
-    const spoke = soundEngine.speakTextToSpeech(ttsInputText, ttsVoiceLang);
+    soundEngine.speakTextToSpeech(ttsInputText, ttsVoiceLang);
     const estDuration = Math.max(2.2, Number((ttsInputText.length * 0.08).toFixed(1)));
     const newId = `tts-${Date.now()}`;
     const ttsClip = createBaseClip({
       id: newId,
       trackId: 'track-audio-main',
       trackType: 'audio',
-      title: `TTS (${ttsVoiceLang}): ${ttsInputText.slice(0, 16)}...`,
-      titleHi: `TTS वॉइस (${ttsVoiceLang}): ${ttsInputText.slice(0, 16)}...`,
+      title: `TTS: ${ttsInputText.slice(0, 16)}`,
       startTime: Number(playheadTime.toFixed(2)),
       duration: estDuration,
       sourceType: 'synth-audio',
@@ -992,10 +1256,8 @@ export function App() {
     }));
     setSelectedClipId(newId);
     triggerToast(
-      spoke
-        ? 'Synthesized voice via Web Speech API and added TTS clip to Audio Track.'
-        : 'Added TTS clip to Audio Track (Browser Web Speech synthesis fallback).',
-      'टेक्स्ट-टू-स्पीच (TTS) वॉइस जनरेट कर ऑडियो ट्रैक में जोड़ी गई।'
+      'Added TTS voice clip to Audio Track.',
+      'टेक्स्ट-टू-स्पीच वॉइस ऑडियो ट्रैक में जोड़ी गई।'
     );
   };
 
@@ -1004,13 +1266,14 @@ export function App() {
       const started = await soundEngine.startVoiceoverRecording();
       if (started) {
         setIsRecordingVoice(true);
+        triggerToast('Recording microphone voiceover...', 'माइक वॉइसओवर रिकॉर्डिंग चालू...');
       } else {
         const newId = `vo-${Date.now()}`;
         const voClip = createBaseClip({
           id: newId,
           trackId: 'track-audio-main',
           trackType: 'audio',
-          title: 'Hindi Voiceover Track (वॉइसओवर)',
+          title: 'Voiceover Track',
           startTime: Number(playheadTime.toFixed(2)),
           duration: 3.5,
           sourceType: 'synth-audio',
@@ -1023,8 +1286,8 @@ export function App() {
         }));
         setSelectedClipId(newId);
         triggerToast(
-          'Microphone permission unavailable in sandbox — added demo Voiceover clip to timeline.',
-          'माइक अनुमति उपलब्ध न होने के कारण डेमो वॉइसओवर ट्रैक टाइमलाइन पर जोड़ा गया।'
+          'Mic unavailable — added fallback Voiceover clip.',
+          'माइक उपलब्ध न होने पर डेमो वॉइसओवर जोड़ा गया।'
         );
       }
     } else {
@@ -1048,13 +1311,14 @@ export function App() {
         clips: [...prev.clips, voClip],
       }));
       setSelectedClipId(newId);
+      triggerToast('Voiceover added to Audio Track.', 'वॉइसओवर ऑडियो ट्रैक में जोड़ा गया।');
     }
   };
 
-  const handleLoadTemplate = (tpl: TemplatePreset) => {
+  const handleLoadTemplate = async (tpl: TemplatePreset) => {
     const newProj: ProjectData = {
       id: `proj-tpl-${Date.now()}`,
-      name: `${tpl.nameHi} · ${tpl.nameEn}`,
+      name: lang === 'hi' ? tpl.nameHi : tpl.nameEn,
       aspectRatio: tpl.aspectRatio,
       fps: 30,
       resolution: '1080p',
@@ -1066,14 +1330,28 @@ export function App() {
         gradientTo: '#1E293B',
         blurAmount: 20,
       },
-      watermarkEnabled: !project.isProUnlocked,
-      isProUnlocked: project.isProUnlocked,
+      watermarkEnabled: !globalProUnlocked,
+      isProUnlocked: globalProUnlocked,
       clips: tpl.clips.map((c) => ({ ...c, id: `${c.id}-${Date.now()}` })),
     };
-    setProject(newProj);
-    setPlayheadTime(0);
-    setSelectedClipId(newProj.clips[0]?.id || null);
-    setWorkspaceMode('editor');
+    await saveProjectToStorage(newProj);
+    setProjects((prev) => [newProj, ...prev]);
+    openEditorWithProject(newProj);
+  };
+
+  const handleLoadSampleDemoProject = async () => {
+    const sampleProj: ProjectData = {
+      ...INITIAL_PROJECT,
+      id: `proj-sample-${Date.now()}`,
+      name: 'Sample Project (Demo Reel)',
+      updatedAt: new Date().toISOString(),
+      watermarkEnabled: !globalProUnlocked,
+      isProUnlocked: globalProUnlocked,
+      clips: INITIAL_PROJECT.clips.map((c) => ({ ...c, id: `${c.id}-${Date.now()}` })),
+    };
+    await saveProjectToStorage(sampleProj);
+    setProjects((prev) => [sampleProj, ...prev]);
+    openEditorWithProject(sampleProj);
   };
 
   // Interactive Canvas Click for Custom Polygon Mask Drawing
@@ -1089,62 +1367,100 @@ export function App() {
     });
   };
 
-  // Real Video Export via Canvas CaptureStream + MediaRecorder
+  // ============================================================================
+  // VIDEO EXPORT WITH CANCEL BUTTON & CAPACITOR FILESYSTEM / SHARE (Section F)
+  // ============================================================================
   const handleStartVideoExport = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     setIsExportingVideo(true);
     setExportProgress(0);
     setExportedVideoUrl(null);
+    setExportedVideoBlob(null);
     setIsPlaying(false);
+    exportCancelledRef.current = false;
 
     try {
       const stream = canvas.captureStream(project.fps);
-      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-        ? 'video/webm;codecs=vp9'
-        : 'video/webm';
+      const mimeType =
+        typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+          ? 'video/webm;codecs=vp9'
+          : 'video/webm';
       const recorder = new MediaRecorder(stream, { mimeType });
+      exportRecorderRef.current = recorder;
       const chunks: Blob[] = [];
 
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
+        if (e.data && e.data.size > 0) chunks.push(e.data);
       };
 
       recorder.onstop = () => {
+        if (exportCancelledRef.current) {
+          setIsExportingVideo(false);
+          setExportProgress(0);
+          triggerToast('Export cancelled.', 'एक्सपोर्ट रद्द किया गया।');
+          return;
+        }
         const blob = new Blob(chunks, { type: 'video/webm' });
         const url = URL.createObjectURL(blob);
         setExportedVideoBlob(blob);
         setExportedVideoUrl(url);
         setIsExportingVideo(false);
         setExportProgress(100);
+        triggerToast(
+          'Video rendered (.webm)! Tap Save & Share below.',
+          'वीडियो तैयार (.webm)! नीचे सेव और शेयर बटन दबाएं।'
+        );
       };
 
       recorder.start();
 
       const exportDuration = Math.min(totalDuration, 6);
-      const totalSteps = 60;
+      const totalSteps = 50;
       let step = 0;
 
-      const interval = setInterval(() => {
+      exportIntervalRef.current = setInterval(() => {
+        if (exportCancelledRef.current) {
+          if (exportIntervalRef.current) clearInterval(exportIntervalRef.current);
+          return;
+        }
         step++;
         const simTime = (step / totalSteps) * totalDuration;
         setPlayheadTime(simTime);
         setExportProgress(Math.min(99, Math.round((step / totalSteps) * 100)));
 
         if (step >= totalSteps) {
-          clearInterval(interval);
-          recorder.stop();
+          if (exportIntervalRef.current) clearInterval(exportIntervalRef.current);
+          if (recorder.state !== 'inactive') recorder.stop();
         }
-      }, (exportDuration * 450) / totalSteps);
-    } catch {
+      }, (exportDuration * 420) / totalSteps);
+    } catch (err) {
       setIsExportingVideo(false);
-      setExportProgress(100);
+      setExportProgress(0);
+      triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  // Filter Effects & Transitions for Library Panel
+  const handleCancelVideoExport = () => {
+    exportCancelledRef.current = true;
+    if (exportIntervalRef.current) {
+      clearInterval(exportIntervalRef.current);
+      exportIntervalRef.current = null;
+    }
+    try {
+      if (exportRecorderRef.current && exportRecorderRef.current.state !== 'inactive') {
+        exportRecorderRef.current.stop();
+      }
+    } catch {
+      // ignore
+    }
+    setIsExportingVideo(false);
+    setExportProgress(0);
+  };
+
+  // Filtered Effects Catalog
   const filteredEffects = EFFECTS_CATALOG.filter((item) => {
-    if (effectCategory === 'Transitions') return false;
     if (effectCategory === 'Trending' && !item.isTrending2026) return false;
     if (
       effectCategory !== 'All' &&
@@ -1158,65 +1474,97 @@ export function App() {
     return (
       item.nameEn.toLowerCase().includes(q) ||
       item.nameHi.toLowerCase().includes(q) ||
-      item.id.toLowerCase().includes(q) ||
-      item.descEn.toLowerCase().includes(q)
+      item.id.toLowerCase().includes(q)
     );
   });
 
-  const filteredTransitions = TRANSITIONS_CATALOG.filter((tr) => {
-    if (
-      effectCategory !== 'All' &&
-      effectCategory !== 'Transitions' &&
-      !(effectCategory === 'Trending' && tr.isTrending2026)
-    ) {
-      return false;
-    }
-    if (!effectSearch.trim()) return true;
-    const q = effectSearch.toLowerCase();
-    return (
-      tr.nameEn.toLowerCase().includes(q) ||
-      tr.nameHi.toLowerCase().includes(q) ||
-      tr.id.toLowerCase().includes(q)
-    );
-  });
+  // Helper to render a touch-friendly 44px Slider Row with numeric readout and Reset button
+  const renderTouchSlider = (opts: {
+    label: string;
+    value: number;
+    min: number;
+    max: number;
+    step?: number;
+    defaultValue: number;
+    unit?: string;
+    onChange: (val: number) => void;
+    onReset: () => void;
+  }) => (
+    <div className="py-1.5 space-y-1">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-medium text-slate-200">{opts.label}</span>
+        <span className="font-mono tabular-nums text-amber-400 font-semibold">
+          {opts.value}
+          {opts.unit || ''}
+        </span>
+      </div>
+      <div className="flex items-center gap-2 min-h-[44px]">
+        <input
+          type="range"
+          min={opts.min}
+          max={opts.max}
+          step={opts.step ?? 1}
+          value={opts.value}
+          onChange={(e) => opts.onChange(Number(e.target.value))}
+          aria-label={opts.label}
+          className="flex-1 h-6 accent-amber-500 cursor-pointer"
+        />
+        <button
+          type="button"
+          onClick={opts.onReset}
+          aria-label={`Reset ${opts.label}`}
+          title="Reset"
+          className="min-w-[44px] min-h-[44px] rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 flex items-center justify-center shrink-0"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  );
 
+  // ============================================================================
+  // ROOT SAFE-AREA CONTAINER (Section C: Android Edge-to-Edge Safe Area Padding)
+  // ============================================================================
   return (
-    <div className="min-h-screen flex flex-col bg-[#0B0F17] text-slate-100">
-      {/* Hidden File Inputs */}
+    <div
+      style={{
+        paddingTop: 'max(env(safe-area-inset-top, 0px), 32px)',
+        paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 24px)',
+        paddingLeft: 'max(env(safe-area-inset-left, 0px), 12px)',
+        paddingRight: 'max(env(safe-area-inset-right, 0px), 12px)',
+      }}
+      className="h-[100dvh] max-h-[100dvh] w-full max-w-[100vw] overflow-hidden flex flex-col bg-[#070A10] text-slate-100 select-none"
+    >
+      {/* Hidden Native File Inputs */}
       <input
-        ref={fileInputRef}
+        ref={pickerFileInputRef}
         type="file"
         accept="video/*,image/*"
         multiple
-        onChange={handleGalleryFileUpload}
+        onChange={handlePickerFilesSelected}
+        className="hidden"
+      />
+      <input
+        ref={editorMediaInputRef}
+        type="file"
+        accept="video/*,image/*"
+        multiple
+        onChange={(e) => handleEditorDirectFileImport(e, 'video')}
+        className="hidden"
+      />
+      <input
+        ref={pipOverlayInputRef}
+        type="file"
+        accept="video/*,image/*"
+        multiple
+        onChange={(e) => handleEditorDirectFileImport(e, 'overlay')}
         className="hidden"
       />
       <input
         ref={audioInputRef}
         type="file"
         accept="audio/*"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          const url = URL.createObjectURL(file);
-          const newId = `aud-custom-${Date.now()}`;
-          const newClip = createBaseClip({
-            id: newId,
-            trackId: 'track-audio-main',
-            trackType: 'audio',
-            title: file.name.replace(/\.[^/.]+$/, ''),
-            startTime: 0,
-            duration: totalDuration,
-            sourceType: 'uploaded-audio',
-            mediaUrl: url,
-            beatMarkers: [0.6, 1.2, 1.8, 2.4, 3.0, 3.6, 4.2, 4.8],
-          });
-          updateProjectWithHistory((prev) => ({
-            ...prev,
-            clips: [...prev.clips, newClip],
-          }));
-          setSelectedClipId(newId);
-        }}
+        onChange={(e) => handleEditorDirectFileImport(e, 'audio')}
         className="hidden"
       />
       <input
@@ -1227,1790 +1575,961 @@ export function App() {
         className="hidden"
       />
 
-      {/* Toast Notification for Best-Effort / Demo Features */}
+      {/* Step-by-Step Toast Notification */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 max-w-md bg-slate-900/95 border border-amber-500/60 text-slate-100 px-4 py-3 rounded-xl shadow-2xl flex items-start gap-3 backdrop-blur-md">
-          <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <div className="text-xs leading-relaxed flex-1">{toastMessage}</div>
+        <div className="fixed top-12 inset-x-4 z-50 max-w-sm mx-auto bg-slate-900/95 border border-amber-500/70 text-slate-100 px-3.5 py-2.5 rounded-xl shadow-2xl flex items-center gap-2.5 backdrop-blur-md">
+          <Info className="w-4 h-4 text-amber-400 shrink-0" />
+          <div className="text-xs leading-snug flex-1 min-w-0 break-words">{toastMessage}</div>
           <button
             type="button"
             onClick={() => setToastMessage(null)}
-            className="text-slate-400 hover:text-slate-100"
+            aria-label="Close notification"
+            className="min-w-[32px] min-h-[32px] flex items-center justify-center text-slate-400 hover:text-slate-100 shrink-0"
           >
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* TOP BAR CONTRACT: 3 Zones separated by gap-3 on phone, gap-8 on desktop */}
-      <header className="flex items-center justify-between gap-2 sm:gap-8 px-3 sm:px-6 py-2.5 sm:py-3 bg-[#090D14] border-b border-slate-800/90 shrink-0 flex-wrap sm:flex-nowrap">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#editor"
-          onClick={(e) => {
-            e.preventDefault();
-            setWorkspaceMode('editor');
-          }}
-          className="font-display text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
-        >
-          ClipNova
-        </a>
-        <span className="text-[10px] text-slate-500 shrink-0 whitespace-nowrap ml-2">38fc4d9</span>
-
-        {/* Zone 2: 4 concise single-line text navigation links */}
-        <nav className="flex items-center gap-6 text-sm font-medium text-slate-400 flex-wrap">
-          <a
-            href="#editor"
-            onClick={(e) => {
-              e.preventDefault();
-              setWorkspaceMode('editor');
-            }}
-            className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-              workspaceMode === 'editor'
-                ? 'text-amber-400 underline underline-offset-8 decoration-2'
-                : ''
-            }`}
-          >
-            {t(lang, 'navEditor')}
-          </a>
-          <a
-            href="#templates"
-            onClick={(e) => {
-              e.preventDefault();
-              setWorkspaceMode('templates');
-            }}
-            className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-              workspaceMode === 'templates'
-                ? 'text-amber-400 underline underline-offset-8 decoration-2'
-                : ''
-            }`}
-          >
-            {t(lang, 'navTemplates')}
-          </a>
-          <a
-            href="#projects"
-            onClick={(e) => {
-              e.preventDefault();
-              setWorkspaceMode('projects');
-            }}
-            className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-              workspaceMode === 'projects'
-                ? 'text-amber-400 underline underline-offset-8 decoration-2'
-                : ''
-            }`}
-          >
-            {t(lang, 'navProjects')}
-          </a>
-          <a
-            href="#spec"
-            onClick={(e) => {
-              e.preventDefault();
-              setWorkspaceMode('spec');
-            }}
-            className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-              workspaceMode === 'spec'
-                ? 'text-amber-400 underline underline-offset-8 decoration-2'
-                : ''
-            }`}
-          >
-            {t(lang, 'navSpec')}
-          </a>
-        </nav>
-
-        {/* Zone 3: Language Switcher + Primary Export Action */}
-        <div className="flex items-center gap-3 flex-wrap shrink-0">
-          <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5">
-            <Globe className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <select
-              value={lang}
-              onChange={(e) => setLang(e.target.value as LanguageCode)}
-              aria-label="Language Switcher"
-              className="bg-transparent text-xs font-medium text-slate-200 focus:outline-none cursor-pointer"
-            >
-              {SUPPORTED_LANGUAGES.map((l) => (
-                <option key={l.code} value={l.code} className="bg-slate-900 text-slate-100">
-                  {l.nativeLabel}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setExportedVideoUrl(null);
-              setExportedVideoBlob(null);
-              setExportProgress(0);
-              setShowExportModal(true);
-            }}
-            className="min-h-[38px] px-3 sm:px-4 py-2 text-xs font-semibold text-slate-950 bg-amber-500 rounded-lg hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0"
-          >
-            {t(lang, 'btnExportVideo')}
-          </button>
-        </div>
-      </header>
-
-      {/* MAIN WORKSPACE ROUTER */}
-      {workspaceMode === 'spec' && (
-        <main className="flex-1 overflow-y-auto">
-          <SpecBlueprintView
-            specForm={specForm}
-            onChangeSpecForm={setSpecForm}
-            onOpenEditor={() => setWorkspaceMode('editor')}
-          />
-        </main>
-      )}
-
-      {workspaceMode === 'templates' && (
-        <main className="flex-1 overflow-y-auto max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-slate-800 pb-5">
-            <div>
-              <div className="text-xs font-medium text-amber-400">
-                3.8 रेडीमेड टेम्पलेट्स · 1-Tap Beat-Synced Reels with Non-Destructive Layers
+      {/* ===================================================================== */}
+      {/* SCREEN 1: CAPCUT-STYLE HOME SCREEN (Home / Templates / Projects Tabs) */}
+      {/* ===================================================================== */}
+      {screen === 'home' && (
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+          {/* Home Header */}
+          <header className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800/80 shrink-0 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-amber-500 text-slate-950 font-display font-bold text-base flex items-center justify-center shadow-md shrink-0">
+                CN
               </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-100 mt-1">
-                {lang === 'hi'
-                  ? 'रेडीमेड क्रिएटर टेम्पलेट्स (1-टैप स्लॉट्स)'
-                  : 'Ready-Made Creator Templates (1-Tap Slots)'}
-              </h1>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {TEMPLATE_PRESETS.map((tpl) => (
-              <div
-                key={tpl.id}
-                className="bg-[#0F1522] border border-slate-800 rounded-xl p-6 flex flex-col justify-between space-y-5 hover:border-slate-700 transition-colors"
-              >
-                <div className="space-y-3">
-                  <div className="text-xs text-slate-400">
-                    <span>{tpl.category}</span>
-                    <span className="mx-1.5">·</span>
-                    <span className="font-mono tabular-nums">{tpl.aspectRatio}</span>
-                    <span className="mx-1.5">·</span>
-                    <span className="font-mono tabular-nums">{tpl.bpm} BPM</span>
-                  </div>
-                  <h2 className="text-lg font-bold text-slate-100">
-                    {lang === 'hi' ? tpl.nameHi : tpl.nameEn}
-                  </h2>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    {lang === 'hi' ? tpl.descriptionHi : tpl.descriptionEn}
-                  </p>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-display text-lg font-bold tracking-tight text-slate-100 truncate">
+                    ClipNova
+                  </span>
+                  {globalProUnlocked && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-semibold">
+                      PRO
+                    </span>
+                  )}
                 </div>
-
-                <div className="pt-4 border-t border-slate-800/80 flex items-center justify-between gap-3">
-                  <div className="font-mono tabular-nums text-xs text-slate-400">
-                    {tpl.slotsCount} Slots · {tpl.duration}s
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleLoadTemplate(tpl)}
-                    className="min-h-[40px] px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>{lang === 'hi' ? 'टेम्पलेट लोड करें' : 'Use Template'}</span>
-                  </button>
+                <div className="text-[11px] font-mono text-slate-500 truncate">
+                  v3.0 · Build: {BUILD_ID.slice(0, 7)}
                 </div>
               </div>
-            ))}
-          </div>
-        </main>
-      )}
-
-      {workspaceMode === 'projects' && (
-        <main className="flex-1 overflow-y-auto max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
-            <div>
-              <div className="text-xs font-medium text-amber-400">
-                3.1 प्रोजेक्ट और मीडिया मैनेजमेंट · Local Auto-Save & Crash Recovery
-              </div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-100 mt-1">
-                {lang === 'hi' ? 'ड्राफ्ट प्रोजेक्ट्स' : 'Saved Draft Projects'}
-              </h1>
             </div>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => downloadProjectJson(project)}
-                className="min-h-[42px] px-4 py-2 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 text-xs font-medium text-slate-200 transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                <Download className="w-4 h-4 text-sky-400" />
-                <span>{t(lang, 'exportJsonBtn')}</span>
-              </button>
+
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => {
-                  const fresh: ProjectData = {
-                    ...INITIAL_PROJECT,
-                    id: `proj-${Date.now()}`,
-                    name: `नया रील प्रोजेक्ट #${drafts.length + 1}`,
-                    updatedAt: new Date().toISOString(),
-                  };
-                  setProject(fresh);
-                  setWorkspaceMode('editor');
+                  const targetProj = projects[0] || project;
+                  openEditorWithProject(targetProj);
+                  setExportedVideoUrl(null);
+                  setExportedVideoBlob(null);
+                  setExportProgress(0);
+                  setShowExportModal(true);
                 }}
-                className="min-h-[42px] px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                aria-label={t(lang, 'btnExportSmall')}
+                className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shrink-0"
               >
-                <FolderPlus className="w-4 h-4" />
-                <span>{lang === 'hi' ? '+ नया प्रोजेक्ट' : '+ New Project'}</span>
+                <Download className="w-4 h-4" />
+                <span>{t(lang, 'btnExportSmall')}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setScreen('settings')}
+                aria-label="Open Settings"
+                className="min-w-[44px] min-h-[44px] rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 flex items-center justify-center shrink-0"
+              >
+                <Settings className="w-5 h-5" />
               </button>
             </div>
-          </div>
+          </header>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {drafts.map((d) => {
-              const isCurrent = d.id === project.id;
-              return (
-                <div
-                  key={d.id}
-                  className={`p-5 rounded-xl border bg-[#0F1522] flex flex-col justify-between space-y-4 ${
-                    isCurrent ? 'border-amber-500/60' : 'border-slate-800'
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="text-xs text-slate-400 font-mono tabular-nums">
-                      <span>{d.aspectRatio}</span>
-                      <span className="mx-1.5">·</span>
-                      <span>{d.resolution}</span>
-                      <span className="mx-1.5">·</span>
-                      <span>{d.fps}fps</span>
-                      <span className="mx-1.5">·</span>
-                      <span>{d.clips.length} clips</span>
-                    </div>
-                    <input
-                      type="text"
-                      value={d.name}
-                      onChange={(e) => {
-                        const newName = e.target.value;
-                        if (isCurrent) setProject({ ...project, name: newName });
-                        setDrafts((prev) =>
-                          prev.map((item) =>
-                            item.id === d.id ? { ...item, name: newName } : item
-                          )
-                        );
-                      }}
-                      className="w-full bg-transparent text-base font-semibold text-slate-100 border-b border-transparent focus:border-amber-500 focus:outline-none pb-0.5"
-                    />
-                    <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                      Auto-saved: {new Date(d.updatedAt).toLocaleString()}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-800/80">
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const dup: ProjectData = {
-                            ...d,
-                            id: `proj-${Date.now()}`,
-                            name: `${d.name} (Copy)`,
-                            updatedAt: new Date().toISOString(),
-                          };
-                          setDrafts((prev) => [dup, ...prev]);
-                        }}
-                        className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs"
-                        title="Duplicate Project"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                      {drafts.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setDrafts((prev) => prev.filter((item) => item.id !== d.id));
-                          }}
-                          className="p-2 rounded-lg bg-slate-900 hover:bg-rose-950 text-rose-400 text-xs"
-                          title="Delete Draft"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-
+          {/* Home Main Content Area */}
+          <main className="flex-1 overflow-y-auto py-4 space-y-5 min-w-0">
+            {(homeTab === 'home' || homeTab === 'projects') && (
+              <>
+                {/* Big CapCut-Style "New Project" Hero Button + Quick Open Editor Row */}
+                {homeTab === 'home' && (
+                  <div className="space-y-2.5">
                     <button
                       type="button"
-                      onClick={() => {
-                        setProject(d);
-                        setWorkspaceMode('editor');
-                      }}
-                      className="min-h-[38px] px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+                      onClick={handleStartNewProject}
+                      aria-label={t(lang, 'newProjectBtn')}
+                      className="w-full min-h-[84px] p-4 rounded-2xl bg-gradient-to-r from-amber-500 via-amber-400 to-orange-400 text-slate-950 shadow-lg flex items-center justify-between gap-3 active:scale-[0.99] transition-transform"
                     >
-                      {isCurrent ? 'Active' : 'Open'}
+                      <div className="flex items-center gap-3.5 text-left min-w-0">
+                        <div className="w-12 h-12 rounded-xl bg-slate-950/15 flex items-center justify-center shrink-0">
+                          <Plus className="w-7 h-7 stroke-[2.5]" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-display text-lg font-bold leading-tight truncate">
+                            {t(lang, 'newProjectBtn')}
+                          </div>
+                          <div className="text-xs font-medium text-slate-900/80 truncate mt-0.5">
+                            {t(lang, 'newProjectSub')}
+                          </div>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-5 h-5 shrink-0" />
                     </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </main>
-      )}
 
-      {/* EDITOR STUDIO WORKSPACE (Portrait-Friendly Responsive Mobile + Desktop Layout) */}
-      {workspaceMode === 'editor' && (
-        <div className="flex-1 flex flex-col overflow-y-auto lg:overflow-hidden">
-          {/* Upper Split: Preview on top in portrait mobile (order-1), Tool Dock below (order-2); side-by-side on desktop */}
-          <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 min-h-0 lg:overflow-hidden">
-            <div className="order-2 lg:order-1 lg:col-span-5 flex border-b lg:border-b-0 lg:border-r border-slate-800/90 bg-[#0E131F] min-h-[260px] max-h-[340px] lg:max-h-none overflow-hidden">
-              {/* Vertical Tool Rail */}
-              <div className="w-20 bg-[#090D14] border-r border-slate-800/90 flex flex-col items-center py-2 gap-1 overflow-y-auto shrink-0">
-                {[
-                  { id: 'layers' as const, icon: Layers, label: t(lang, 'toolLayers') },
-                  { id: 'effects' as const, icon: Sparkles, label: t(lang, 'toolEffects') },
-                  { id: 'media' as const, icon: Film, label: t(lang, 'toolMedia') },
-                  { id: 'text' as const, icon: Type, label: t(lang, 'toolText') },
-                  { id: 'audio' as const, icon: Music, label: t(lang, 'toolAudio') },
-                  { id: 'color' as const, icon: Palette, label: t(lang, 'toolColor') },
-                  { id: 'keyframes' as const, icon: KeyRound, label: t(lang, 'toolKeyframes') },
-                  { id: 'speed' as const, icon: Gauge, label: t(lang, 'toolSpeed') },
-                ].map((tab) => {
-                  const Icon = tab.icon;
-                  const active = activeTool === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setActiveTool(tab.id)}
-                      className={`w-16 min-h-[50px] px-1 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors ${
-                        active
-                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/40'
-                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-                      }`}
-                    >
-                      <Icon className="w-4 h-4 shrink-0" />
-                      <span className="text-[10px] font-medium leading-tight text-center truncate w-full">
-                        {tab.label}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Tool Inspector Content Area */}
-              <div className="flex-1 p-4 overflow-y-auto space-y-5">
-                {/* ========================================================= */}
-                {/* TAB 1: NON-DESTRUCTIVE ADJUSTMENT & EFFECT OVERLAY LAYERS */}
-                {/* ========================================================= */}
-                {activeTool === 'layers' && (
-                  <div className="space-y-4">
-                    {/* Section: Create Layers */}
-                    <div className="space-y-1">
+                    <div className="grid grid-cols-2 gap-2.5">
                       <button
                         type="button"
-                        onClick={() => toggleAccordion('create-layers')}
-                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
+                        onClick={() => openEditorWithProject(projects[0] || project)}
+                        className="min-h-[46px] px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-100 font-semibold text-xs flex items-center justify-center gap-2"
                       >
-                        <div className="flex items-center gap-2">
-                          <div className="text-[11px] font-semibold text-cyan-400">
-                            {t(lang, 'nonDestructiveBadge')}
-                          </div>
-                          <h2 className="text-sm font-bold text-slate-100">
-                            {lang === 'hi'
-                              ? 'एडजस्टमेंट लेयर और इफेक्ट ओवरले लेयर'
-                              : 'Adjustment Layers & Effect Overlay Layers'}
-                          </h2>
-                        </div>
-                        {accordionOpen === 'create-layers' ? (
-                          <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-                        ) : (
-                          <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
-                        )}
-                      </button>
-                      {accordionOpen === 'create-layers' && (
-                        <div className="mt-3 space-y-2">
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                            <button
-                              type="button"
-                              onClick={handleCreateAdjustmentLayer}
-                              className="min-h-[42px] px-3 py-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-1.5"
-                            >
-                              <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                              <span>{t(lang, 'createAdjustmentLayer')}</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleCreateEffectLayer('light-leak', playheadTime)}
-                              className="min-h-[42px] px-3 py-2 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/50 text-fuchsia-200 font-semibold text-xs flex items-center justify-center gap-1.5"
-                            >
-                              <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-                              <span>{t(lang, 'createEffectOverlayLayer')}</span>
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Section: Active Layer or Clip Inspector */}
-                    <div className="space-y-1">
-                      <button
-                        type="button"
-                        onClick={() => toggleAccordion('clip-inspector')}
-                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-slate-300">
-                            {selectedClip ? `Selected: ${selectedClip.title}` : 'No clip selected'}
-                          </span>
-                          {accordionOpen === 'clip-inspector' ? (
-                            <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
-                          )}
-                        </div>
-                      </button>
-                      {accordionOpen === 'clip-inspector' && (
-                        <div className="mt-3 space-y-2">
-                          {selectedClip ? (
-                            <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4">
-                              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-                                <div>
-                                  <div className="text-xs font-bold text-amber-400">
-                                    {selectedClip.trackType === 'adjustment'
-                                      ? '◐ Adjustment Layer Active'
-                                      : selectedClip.trackType === 'effect-layer'
-                                      ? '✦ Effect Overlay Layer Active'
-                                      : `Selected Clip: ${selectedClip.trackType.toUpperCase()}`}
-                                  </div>
-                                  <div className="text-xs text-slate-200 truncate">
-                                    {selectedClip.title} ({selectedClip.startTime}s –{' '}
-                                    {(selectedClip.startTime + selectedClip.duration).toFixed(1)}s)
-                                  </div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={handleAddKeyframeAtPlayhead}
-                                  className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-semibold"
-                                >
-                                  {t(lang, 'btnAddKeyframe')}
-                                </button>
-                              </div>
-
-                        {/* Blend Mode & Opacity (Works on Adjustment Layers, Effect Layers & Clips) */}
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              {t(lang, 'blendMode')}
-                            </label>
-                            <select
-                              value={selectedClip.blendMode}
-                              onChange={(e) =>
-                                updateSelectedClip({ blendMode: e.target.value as BlendModeType })
-                              }
-                              className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                            >
-                              <option value="source-over">Normal (Pass-Through)</option>
-                              <option value="screen">Screen (Lighten/Add)</option>
-                              <option value="multiply">Multiply (Darken)</option>
-                              <option value="overlay">Overlay (Contrast)</option>
-                              <option value="lighter">Add / Linear Dodge</option>
-                              <option value="color-dodge">Color Dodge</option>
-                              <option value="hard-light">Hard Light</option>
-                            </select>
-                          </div>
-
-                          <div>
-                            <div className="flex justify-between text-[11px] text-slate-400 mb-1">
-                              <span>{t(lang, 'opacity')}</span>
-                              <span className="font-mono tabular-nums text-amber-400">
-                                {Math.round(selectedClip.opacity * 100)}%
-                              </span>
-                            </div>
-                            <input
-                              type="range"
-                              min={0.05}
-                              max={1}
-                              step={0.05}
-                              value={selectedClip.opacity}
-                              onChange={(e) =>
-                                updateSelectedClip({ opacity: Number(e.target.value) })
-                              }
-                              className="w-full accent-amber-500"
-                            />
-                          </div>
-                        </div>
-
-                        {/* If Effect Overlay Layer or Clip: Shader Effect Type & Intensity */}
-                        {(selectedClip.trackType === 'effect-layer' ||
-                          selectedClip.trackType === 'video' ||
-                          selectedClip.trackType === 'overlay') && (
-                          <div className="p-3 rounded-lg bg-slate-950 border border-fuchsia-500/30 space-y-2.5">
-                            <div className="grid grid-cols-2 gap-2.5 items-center">
-                              <div>
-                                <label className="block text-[11px] text-slate-400 mb-1">
-                                  Shader Effect
-                                </label>
-                                <select
-                                  value={selectedClip.effect}
-                                  onChange={(e) =>
-                                    updateSelectedClip({
-                                      effect: e.target.value as VideoEffectType,
-                                    })
-                                  }
-                                  className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-800 text-xs text-slate-100"
-                                >
-                                  <option value="none">None</option>
-                                  {EFFECTS_CATALOG.map((fx) => (
-                                    <option key={fx.id} value={fx.id}>
-                                      {lang === 'hi' ? fx.nameHi : fx.nameEn}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                              <div>
-                                <div className="flex justify-between text-[11px] text-slate-400 mb-1">
-                                  <span>{t(lang, 'layerIntensity')}</span>
-                                  <span className="font-mono tabular-nums text-fuchsia-400">
-                                    {selectedClip.effectIntensity ?? 75}%
-                                  </span>
-                                </div>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={100}
-                                  value={selectedClip.effectIntensity ?? 75}
-                                  onChange={(e) =>
-                                    updateSelectedClip({
-                                      effectIntensity: Number(e.target.value),
-                                    })
-                                  }
-                                  className="w-full accent-fuchsia-500"
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* 13 Non-Destructive Adjustment Sliders */}
-                        <div className="space-y-2.5 pt-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold text-cyan-300">
-                              {lang === 'hi'
-                                ? 'नॉन-डिस्ट्रक्टिव कलर और टोन कंट्रोल्स'
-                                : 'Non-Destructive Color & Tone Parameters'}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                updateSelectedClip({ adjustments: { ...DEFAULT_ADJUSTMENTS } })
-                              }
-                              className="text-[11px] text-amber-400 hover:underline"
-                            >
-                              {t(lang, 'resetAdjustments')}
-                            </button>
-                          </div>
-
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2.5">
-                            {(
-                              [
-                                { key: 'brightness', i18n: 'brightness', min: -50, max: 50 },
-                                { key: 'contrast', i18n: 'contrast', min: -50, max: 50 },
-                                { key: 'saturation', i18n: 'saturation', min: -50, max: 50 },
-                                { key: 'exposure', i18n: 'exposure', min: -50, max: 50 },
-                                { key: 'highlights', i18n: 'highlights', min: -50, max: 50 },
-                                { key: 'shadows', i18n: 'shadows', min: -50, max: 50 },
-                                { key: 'temperature', i18n: 'temperature', min: -50, max: 50 },
-                                { key: 'tint', i18n: 'tint', min: -50, max: 50 },
-                                { key: 'hue', i18n: 'hue', min: -180, max: 180 },
-                                { key: 'blur', i18n: 'blur', min: 0, max: 50 },
-                                { key: 'vignette', i18n: 'vignette', min: 0, max: 100 },
-                                { key: 'grain', i18n: 'grain', min: 0, max: 100 },
-                                { key: 'sharpen', i18n: 'sharpen', min: 0, max: 100 },
-                              ] as const
-                            ).map((sl) => (
-                              <div key={sl.key} className="space-y-0.5">
-                                <div className="flex justify-between text-[11px]">
-                                  <span className="text-slate-300 truncate">
-                                    {t(lang, sl.i18n)}
-                                  </span>
-                                  <span className="font-mono tabular-nums text-cyan-400">
-                                    {selectedClip.adjustments[sl.key] ?? 0}
-                                  </span>
-                                </div>
-                                <input
-                                  type="range"
-                                  min={sl.min}
-                                  max={sl.max}
-                                  value={selectedClip.adjustments[sl.key] ?? 0}
-                                  onChange={(e) =>
-                                    updateSelectedClip({
-                                      adjustments: {
-                                        ...selectedClip.adjustments,
-                                        [sl.key]: Number(e.target.value),
-                                      },
-                                    })
-                                  }
-                                  className="w-full accent-cyan-400"
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-slate-400">
-                        टाइमलाइन से कोई एडजस्टमेंट लेयर, इफेक्ट लेयर या क्लिप चुनें।
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-                {/* ========================================================= */}
-                {/* TAB 2: TRENDING EFFECTS & TRANSITIONS LIBRARY             */}
-                {/* ========================================================= */}
-                {activeTool === 'effects' && (
-                  <div className="space-y-4">
-                    {/* Section: Effects & Transitions */}
-                    <div className="space-y-1">
-                      <button
-                        type="button"
-                        onClick={() => toggleAccordion('effects-library')}
-                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
-                      >
-                        <div className="flex items-center gap-2">
-                          <h2 className="text-sm font-bold text-slate-100">
-                            {lang === 'hi'
-                              ? 'ट्रेंडिंग इफेक्ट्स और ट्रांज़िशन लाइब्रेरी'
-                              : 'Effects & Transitions Library'}
-                          </h2>
-                          <p className="text-[11px] text-slate-400">{t(lang, 'dragHint')}</p>
-                        </div>
-                        {accordionOpen === 'effects-library' ? (
-                          <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
-                        ) : (
-                          <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
-                        )}
-                      </button>
-                      {accordionOpen === 'effects-library' && (
-                      <button
-                        type="button"
-                        onClick={() => setShowTrendFindings((s) => !s)}
-                        className="px-2.5 py-1 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[11px] font-medium shrink-0"
-                      >
-                        {showTrendFindings ? 'Hide Research' : 'Search Trends'}
-                      </button>
-                      )}
-                    </div>
-
-                    {/* Google Search Findings Summary Box */}
-                    {showTrendFindings && (
-                      <div className="p-3 rounded-xl bg-slate-950 border border-amber-500/40 space-y-2 text-xs">
-                        <div className="font-semibold text-amber-400">
-                          {t(lang, 'trendingResearchTitle')}
-                        </div>
-                        {TRENDING_SEARCH_FINDINGS.map((tf, i) => (
-                          <div key={i} className="border-t border-slate-800/80 pt-1.5">
-                            <div className="font-semibold text-slate-200">
-                              {lang === 'hi' ? tf.trendHi : tf.trendEn}
-                            </div>
-                            <div className="text-[11px] text-slate-400">{tf.findingEn}</div>
-                            <div className="text-[11px] text-emerald-400">{tf.builtAs}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Search Bar */}
-                    <div className="relative">
-                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="text"
-                        value={effectSearch}
-                        onChange={(e) => setEffectSearch(e.target.value)}
-                        placeholder={t(lang, 'searchEffectsPlaceholder')}
-                        className="w-full pl-8 pr-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
-                      />
-                    </div>
-
-                    {/* Category Filter Buttons */}
-                    <div className="flex items-center gap-1 overflow-x-auto pb-1">
-                      {(
-                        [
-                          { id: 'All', label: t(lang, 'catAll') },
-                          { id: 'Trending', label: t(lang, 'catTrending') },
-                          { id: 'Glitch & Digital', label: t(lang, 'catGlitch') },
-                          { id: 'Motion & Velocity', label: t(lang, 'catMotion') },
-                          { id: 'Optical & Light', label: t(lang, 'catOptical') },
-                          { id: 'Transitions', label: t(lang, 'catTransitions') },
-                        ] as const
-                      ).map((cat) => (
-                        <button
-                          key={cat.id}
-                          type="button"
-                          onClick={() => setEffectCategory(cat.id)}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors ${
-                            effectCategory === cat.id
-                              ? 'bg-amber-500 text-slate-950 font-semibold'
-                              : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          {cat.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Effects Grid (Draggable onto Timeline OR 1-Click Create FX Layer / Apply) */}
-                    {filteredEffects.length > 0 && (
-                      <div className="space-y-2">
-                        <div className="text-xs font-semibold text-slate-300">
-                          Original Procedural Effects ({filteredEffects.length})
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          {filteredEffects.map((fx) => (
-                            <div
-                              key={fx.id}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.setData(
-                                  'application/clipnova-item',
-                                  JSON.stringify({ kind: 'effect', id: fx.id })
-                                );
-                              }}
-                              className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 flex flex-col justify-between gap-2 cursor-grab active:cursor-grabbing"
-                            >
-                              <div className="flex items-start gap-2.5">
-                                <div
-                                  style={{ backgroundColor: `${fx.accentColor}25`, borderColor: fx.accentColor }}
-                                  className="w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 font-mono text-[10px] font-bold text-slate-100"
-                                >
-                                  FX
-                                </div>
-                                <div className="min-w-0">
-                                  <div className="text-xs font-semibold text-slate-100 truncate">
-                                    {lang === 'hi' ? fx.nameHi : fx.nameEn}
-                                  </div>
-                                  <div className="text-[10px] text-slate-400 line-clamp-1">
-                                    {lang === 'hi' ? fx.descHi : fx.descEn}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-1.5 pt-1">
-                                <button
-                                  type="button"
-                                  onClick={() => handleCreateEffectLayer(fx.id, playheadTime)}
-                                  className="flex-1 py-1 px-2 rounded bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/40 text-fuchsia-200 text-[10px] font-semibold"
-                                >
-                                  + FX Layer
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={!selectedClip}
-                                  onClick={() =>
-                                    updateSelectedClip({
-                                      effect: fx.id,
-                                      effectIntensity: fx.defaultIntensity,
-                                    })
-                                  }
-                                  className="flex-1 py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-[10px] font-medium"
-                                >
-                                  On Clip
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Transitions Grid */}
-                    {filteredTransitions.length > 0 && (
-                      <div className="space-y-2 pt-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold text-slate-300">
-                            Transitions ({filteredTransitions.length})
-                          </span>
-                          {selectedClip && (
-                            <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                              <span>Duration: {selectedClip.transitionDuration}s</span>
-                              <input
-                                type="range"
-                                min={0.2}
-                                max={1.5}
-                                step={0.1}
-                                value={selectedClip.transitionDuration}
-                                onChange={(e) =>
-                                  updateSelectedClip({
-                                    transitionDuration: Number(e.target.value),
-                                  })
-                                }
-                                className="w-16 accent-amber-500"
-                              />
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2">
-                          {filteredTransitions.map((tr) => {
-                            const active = selectedClip?.transitionIn === tr.id;
-                            return (
-                              <button
-                                key={tr.id}
-                                type="button"
-                                draggable
-                                onDragStart={(e) => {
-                                  e.dataTransfer.setData(
-                                    'application/clipnova-item',
-                                    JSON.stringify({ kind: 'transition', id: tr.id })
-                                  );
-                                }}
-                                onClick={() =>
-                                  updateSelectedClip({
-                                    transitionIn: tr.id,
-                                    transitionDuration: tr.defaultDuration || 0.5,
-                                  })
-                                }
-                                className={`p-2.5 rounded-lg border text-left transition-colors ${
-                                  active
-                                    ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
-                                    : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
-                                }`}
-                              >
-                                <div className="text-xs font-semibold">
-                                  {lang === 'hi' ? tr.nameHi : tr.nameEn}
-                                </div>
-                                <div className="text-[10px] text-slate-400 truncate">
-                                  {lang === 'hi' ? tr.descHi : tr.descEn}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* TAB 3: MEDIA & GALLERY IMPORT                             */}
-                {/* ========================================================= */}
-                {activeTool === 'media' && (
-                  <div className="space-y-5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-sm font-semibold text-slate-100">
-                          Media Library & PIP Overlay
-                        </h2>
-                        <p className="text-xs text-slate-400">
-                          गैलरी से वीडियो/फोटो चुनें या बिल्ट-इन 60FPS क्लिप्स जोड़ें।
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="min-h-[38px] px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                      >
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>Import Media</span>
-                      </button>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-2.5">
-                      {STARTER_MEDIA_LIBRARY.map((item) => (
-                        <div
-                          key={item.id}
-                          className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-3"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-xs font-semibold text-slate-100 truncate">
-                              {lang === 'hi' ? item.titleHi : item.title}
-                            </div>
-                            <div className="text-[11px] text-slate-400 truncate font-mono tabular-nums">
-                              {item.category} · {item.duration}s
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleAddStarterClip(item, 'video')}
-                              className="min-h-[34px] px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100 flex items-center gap-1 whitespace-nowrap"
-                            >
-                              <Plus className="w-3 h-3 text-amber-400" />
-                              <span>+ Main</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleAddStarterClip(item, 'overlay')}
-                              className="min-h-[34px] px-2.5 py-1 rounded bg-sky-950/70 hover:bg-sky-900/80 border border-sky-500/30 text-xs font-medium text-sky-200 flex items-center gap-1 whitespace-nowrap"
-                            >
-                              <Layers className="w-3 h-3" />
-                              <span>+ PIP</span>
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Imported Media - user's own gallery imports */}
-                    {project.clips
-                      .filter((c) => c.sourceType === 'uploaded-video' || c.sourceType === 'uploaded-image')
-                      .length > 0 && (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <h3 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-                            {lang === 'hi' ? 'इम्पोर्ट किया गया मीडिया' : 'Imported Media'}
-                          </h3>
-                          <p className="text-[10px] text-slate-500">
-                            {lang === 'hi' ? 'गैलरी से इम्पोर्ट की गई वीडियो और फ़ोटो' : 'Videos and photos imported from your gallery'}
-                          </p>
-                        </div>
-                        <div className="grid grid-cols-1 gap-2.5">
-                          {project.clips
-                            .filter((c) => c.sourceType === 'uploaded-video' || c.sourceType === 'uploaded-image')
-                            .map((item) => (
-                              <div
-                                key={item.id}
-                                className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-3"
-                              >
-                                <div className="min-w-0">
-                                  <div className="text-xs font-semibold text-slate-100 truncate">
-                                    {item.title}
-                                  </div>
-                                  <div className="text-[11px] text-slate-400 truncate font-mono tabular-nums">
-                                    {item.sourceType} · {item.duration}s
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedClipId(item.id);
-                                      setActiveTool('layers');
-                                    }}
-                                    className="min-h-[34px] px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100 flex items-center gap-1 whitespace-nowrap"
-                                  >
-                                    <Play className="w-3 h-3 text-amber-400" />{' '}
-                                    <span>{lang === 'hi' ? 'प्ले करें' : 'Play'}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const existingOnTrack = project.clips.filter(
-                                        (c) => c.trackType === item.trackType
-                                      );
-                                      const startAt = existingOnTrack.reduce(
-                                        (max, c) => Math.max(max, c.startTime + c.duration),
-                                        0
-                                      );
-                                      updateProjectWithHistory((prev) => ({
-                                        ...prev,
-                                        clips: [
-                                          ...prev.clips,
-                                          {
-                                            ...item,
-                                            id: `clip-${Date.now()}`,
-                                            startTime: Number(startAt.toFixed(2)),
-                                          },
-                                        ],
-                                      }));
-                                      setSelectedClipId(item.id);
-                                    }}
-                                    className="min-h-[34px] px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-medium flex items-center gap-1 whitespace-nowrap"
-                                  >
-                                    <Plus className="w-3 h-3" />
-                                    <span>+ Main</span>
-                                  </button>
-                                </div>
-                              </div>
-                            ))}
-                        </div>
-                      </div>
-                    )}
-
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* TAB 4: TEXT, DEVANAGARI CAPTIONS & STICKERS               */}
-                {/* ========================================================= */}
-                {activeTool === 'text' && (
-                  <div className="space-y-5">
-                    <div className="p-3.5 rounded-lg bg-slate-900 border border-slate-800 space-y-2.5">
-                      <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-400">
-                        <Subtitles className="w-4 h-4" />
-                        <span>AI Auto-Captions (वर्ड-बाय-वर्ड कराओके हाइलाइट)</span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleGenerateAutoCaptions('hindi')}
-                          className="min-h-[36px] px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100"
-                        >
-                          हिंदी कैप्शन
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleGenerateAutoCaptions('hinglish')}
-                          className="min-h-[36px] px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100"
-                        >
-                          Hinglish
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleGenerateAutoCaptions('english')}
-                          className="min-h-[36px] px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100"
-                        >
-                          English
-                        </button>
-                      </div>
-                    </div>
-
-                    {selectedClip && selectedClip.trackType === 'text' && (
-                      <div className="p-3.5 rounded-lg bg-slate-900 border border-amber-500/40 space-y-3">
-                        <div className="text-xs font-semibold text-amber-400">
-                          Edit Selected Text / Caption
-                        </div>
-                        <input
-                          type="text"
-                          value={selectedClip.textContent || ''}
-                          onChange={(e) =>
-                            updateSelectedClip({
-                              textContent: e.target.value,
-                              title: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-800 text-sm text-slate-100"
-                        />
-                        <div className="grid grid-cols-2 gap-2.5">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Font Family
-                            </label>
-                            <select
-                              value={selectedClip.fontFamily || 'Noto Sans Devanagari'}
-                              onChange={(e) => updateSelectedClip({ fontFamily: e.target.value })}
-                              className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                            >
-                              {FONT_FAMILIES.map((f) => (
-                                <option key={f.id} value={f.id}>
-                                  {f.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Animation
-                            </label>
-                            <select
-                              value={selectedClip.textAnimation || 'none'}
-                              onChange={(e) =>
-                                updateSelectedClip({
-                                  textAnimation: e.target.value as TextAnimationType,
-                                })
-                              }
-                              className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                            >
-                              <option value="karaoke-highlight">Karaoke Word Highlight</option>
-                              <option value="pop-in">Pop In</option>
-                              <option value="typewriter">Typewriter</option>
-                              <option value="slide-up">Slide Up</option>
-                              <option value="none">Static</option>
-                            </select>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      <div className="text-xs font-medium text-slate-300">
-                        Devanagari & Latin Typography Presets
-                      </div>
-                      <div className="grid grid-cols-1 gap-2">
-                        {FONT_FAMILIES.map((f) => (
-                          <button
-                            key={f.id}
-                            type="button"
-                            onClick={() => handleAddTextOverlay(f.sample, f.id, 'pop-in')}
-                            className="p-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-left flex items-center justify-between"
-                          >
-                            <div>
-                              <div className="text-xs text-slate-400">{f.label}</div>
-                              <div
-                                style={{ fontFamily: f.id }}
-                                className="text-sm font-bold text-slate-100 mt-0.5"
-                              >
-                                {f.sample}
-                              </div>
-                            </div>
-                            <span className="text-xs text-amber-400 font-medium">+ Add</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="text-xs font-medium text-slate-300">Stickers & Emojis</div>
-                      <div className="grid grid-cols-4 gap-2">
-                        {STICKER_PRESETS.map((stk) => (
-                          <button
-                            key={stk.id}
-                            type="button"
-                            onClick={() => handleAddSticker(stk.glyph, stk.label)}
-                            className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 flex flex-col items-center gap-1"
-                          >
-                            <span className="text-xl">{stk.glyph}</span>
-                            <span className="text-[10px] text-slate-400 truncate w-full text-center">
-                              {stk.label}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* TAB 5: AUDIO, TTS, VOICE CHANGER & BEAT SYNC              */}
-                {/* ========================================================= */}
-                {activeTool === 'audio' && (
-                  <div className="space-y-4">
-                    {/* Text-to-Speech (TTS) Box */}
-                    <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
-                      <div className="text-xs font-semibold text-amber-400">
-                        {t(lang, 'ttsTitle')}
-                      </div>
-                      <input
-                        type="text"
-                        value={ttsInputText}
-                        onChange={(e) => setTtsInputText(e.target.value)}
-                        className="w-full px-3 py-2 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                      />
-                      <div className="flex items-center gap-2">
-                        <select
-                          value={ttsVoiceLang}
-                          onChange={(e) =>
-                            setTtsVoiceLang(e.target.value as 'hi-IN' | 'en-IN' | 'en-US')
-                          }
-                          className="px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                        >
-                          <option value="hi-IN">हिन्दी (hi-IN)</option>
-                          <option value="en-IN">English India (en-IN)</option>
-                          <option value="en-US">English Studio (en-US)</option>
-                        </select>
-                        <button
-                          type="button"
-                          onClick={handleSynthesizeTtsToTimeline}
-                          className="flex-1 min-h-[34px] px-3 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs"
-                        >
-                          {t(lang, 'ttsSpeakBtn')}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Voiceover, Extract Audio & Import */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={handleToggleVoiceover}
-                        className={`min-h-[38px] px-3 py-2 rounded-lg font-semibold text-xs flex items-center justify-center gap-1.5 ${
-                          isRecordingVoice
-                            ? 'bg-rose-600 text-white'
-                            : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
-                        }`}
-                      >
-                        {isRecordingVoice ? (
-                          <MicOff className="w-3.5 h-3.5" />
-                        ) : (
-                          <Mic className="w-3.5 h-3.5 text-amber-400" />
-                        )}
-                        <span>
-                          {isRecordingVoice
-                            ? `${t(lang, 'stopVoiceover')} (${recordingSeconds}s)`
-                            : t(lang, 'recordVoiceover')}
+                        <Film className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span className="truncate">
+                          {lang === 'hi' ? 'एडिटर खोलें' : 'Open Editor'}
                         </span>
                       </button>
 
                       <button
                         type="button"
-                        onClick={handleExtractAudioFromVideo}
-                        className="min-h-[38px] px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100 flex items-center justify-center gap-1.5"
+                        onClick={() => {
+                          const targetProj = projects[0] || project;
+                          openEditorWithProject(targetProj);
+                          setExportedVideoUrl(null);
+                          setExportedVideoBlob(null);
+                          setExportProgress(0);
+                          setShowExportModal(true);
+                        }}
+                        className="min-h-[46px] px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 font-bold text-xs flex items-center justify-center gap-2"
                       >
-                        <Scissors className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>{t(lang, 'extractAudio')}</span>
+                        <Download className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span className="truncate">
+                          {lang === 'hi' ? 'वीडियो एक्सपोर्ट करें' : 'Export Video'}
+                        </span>
                       </button>
-                    </div>
-
-                    {/* Voice Changer & Noise Reduction on selected audio clip */}
-                    {selectedClip && selectedClip.trackType === 'audio' && (
-                      <div className="p-3 rounded-xl bg-slate-900 border border-emerald-500/40 space-y-2.5">
-                        <div className="text-xs font-semibold text-emerald-300">
-                          Audio Inspector: {selectedClip.title}
-                        </div>
-                        <div className="grid grid-cols-2 gap-2.5 items-center">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              {t(lang, 'voiceChanger')}
-                            </label>
-                            <select
-                              value={selectedClip.voiceChanger || 'none'}
-                              onChange={(e) => {
-                                updateSelectedClip({
-                                  voiceChanger: e.target.value as VoiceChangerPreset,
-                                });
-                                triggerToast(
-                                  'Applied Web Audio pitch & oscillator Voice Changer preset.',
-                                  'वॉइस चेंजर प्रीसेट ऑडियो ट्रैक पर लागू किया गया।'
-                                );
-                              }}
-                              className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                            >
-                              <option value="none">Normal Voice</option>
-                              <option value="deep-cinema">Deep Bass Narrator</option>
-                              <option value="chipmunk">Helium Chipmunk</option>
-                              <option value="robot-mod">Cyber Robot Mod</option>
-                              <option value="echo-hall">Stadium Echo</option>
-                            </select>
-                          </div>
-
-                          <label className="flex items-center gap-2 text-xs text-slate-200 cursor-pointer pt-4">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(selectedClip.noiseReduction)}
-                              onChange={(e) => {
-                                updateSelectedClip({ noiseReduction: e.target.checked });
-                                triggerToast(
-                                  'Toggled Web Audio bandpass Noise Reduction filter.',
-                                  'नॉइज़ रिडक्शन ऑडियो फ़िल्टर चालू किया गया।'
-                                );
-                              }}
-                              className="w-4 h-4 accent-emerald-500"
-                            />
-                            <span>{t(lang, 'noiseReduction')}</span>
-                          </label>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Royalty-Free Library */}
-                    <div className="space-y-2">
-                      {ROYALTY_FREE_AUDIO.map((track) => (
-                        <div
-                          key={track.id}
-                          className="p-3 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between gap-2"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-xs font-semibold text-slate-100 truncate">
-                              {lang === 'hi' ? track.titleHi : track.title}
-                            </div>
-                            <div className="text-[11px] text-slate-400 font-mono tabular-nums">
-                              {track.bpm} BPM · Auto Beat Markers (•)
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleAddAudioTrack(track)}
-                            className="min-h-[32px] px-3 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-medium shrink-0"
-                          >
-                            Use
-                          </button>
-                        </div>
-                      ))}
                     </div>
                   </div>
                 )}
 
-                {/* ========================================================= */}
-                {/* TAB 6: COLOR GRADING, HSL & .CUBE LUT IMPORT              */}
-                {/* ========================================================= */}
-                {activeTool === 'color' && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-sm font-semibold text-slate-100">
-                          {t(lang, 'toolColor')}
-                        </h2>
-                        <p className="text-[11px] text-slate-400">
-                          Apply LUTs & filter presets directly or onto an Adjustment Layer.
+                {/* Recent Projects List / Grid */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-bold text-slate-200">
+                      {t(lang, 'recentProjectsTitle')} ({projects.length})
+                    </h2>
+                    {homeTab === 'projects' && (
+                      <button
+                        type="button"
+                        onClick={handleStartNewProject}
+                        className="min-h-[38px] px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-semibold text-xs flex items-center gap-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{t(lang, 'newProjectBtn')}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {!projectsLoaded ? (
+                    <div className="p-8 text-center text-sm text-slate-400">Loading projects...</div>
+                  ) : projects.length === 0 ? (
+                    /* Friendly Empty State */
+                    <div className="p-6 rounded-2xl bg-[#0E131F] border border-slate-800/90 text-center space-y-3">
+                      <div className="w-12 h-12 rounded-2xl bg-slate-900 border border-slate-800 mx-auto flex items-center justify-center text-amber-400">
+                        <Film className="w-6 h-6" />
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="text-base font-bold text-slate-100">
+                          {t(lang, 'emptyProjectsTitle')}
+                        </h3>
+                        <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
+                          {t(lang, 'emptyProjectsSub')}
+                        </p>
+                      </div>
+                      <div className="flex items-center justify-center gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleLoadSampleDemoProject}
+                          className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold text-xs flex items-center gap-1.5"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>
+                            {lang === 'hi' ? 'सैंपल प्रोजेक्ट खोलें' : 'Load Sample Project'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {projects.map((proj) => {
+                        const dur = Math.max(
+                          0,
+                          ...proj.clips.map((c) => Number((c.startTime + c.duration).toFixed(1)))
+                        );
+                        const isMenuOpen = openMenuProjectId === proj.id;
+                        const isRenaming = renamingProjectId === proj.id;
+
+                        return (
+                          <div
+                            key={proj.id}
+                            className="relative p-3 rounded-xl bg-[#0E131F] border border-slate-800/90 hover:border-slate-700 flex items-center gap-3 min-w-0"
+                          >
+                            {/* Project Thumbnail */}
+                            <button
+                              type="button"
+                              onClick={() => openEditorWithProject(proj)}
+                              aria-label={`Open ${proj.name}`}
+                              className="w-14 h-20 rounded-lg bg-slate-900 border border-slate-800 overflow-hidden shrink-0 flex items-center justify-center relative"
+                            >
+                              {proj.thumbnailUrl ? (
+                                <img
+                                  src={proj.thumbnailUrl}
+                                  alt={proj.name}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <Film className="w-5 h-5 text-amber-400/80" />
+                              )}
+                              <span className="absolute bottom-1 right-1 px-1 rounded bg-black/75 font-mono text-[10px] text-slate-200">
+                                {dur.toFixed(1)}s
+                              </span>
+                            </button>
+
+                            {/* Project Info */}
+                            <div
+                              onClick={() => {
+                                if (!isRenaming) openEditorWithProject(proj);
+                              }}
+                              className="flex-1 min-w-0 cursor-pointer space-y-1"
+                            >
+                              {isRenaming ? (
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex items-center gap-1.5"
+                                >
+                                  <input
+                                    type="text"
+                                    value={renameInputVal}
+                                    onChange={(e) => setRenameInputVal(e.target.value)}
+                                    className="w-full px-2 py-1 rounded bg-slate-950 border border-amber-500 text-sm text-slate-100 focus:outline-none"
+                                    autoFocus
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const trimmed = renameInputVal.trim() || proj.name;
+                                      const updated = {
+                                        ...proj,
+                                        name: trimmed,
+                                        updatedAt: new Date().toISOString(),
+                                      };
+                                      await saveProjectToStorage(updated);
+                                      setProjects((prev) =>
+                                        prev.map((p) => (p.id === proj.id ? updated : p))
+                                      );
+                                      setRenamingProjectId(null);
+                                    }}
+                                    aria-label="Save name"
+                                    className="min-w-[38px] min-h-[38px] rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center shrink-0"
+                                  >
+                                    <Check className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="text-sm font-bold text-slate-100 truncate">
+                                  {proj.name}
+                                </div>
+                              )}
+                              <div className="text-xs text-slate-400 font-mono tabular-nums truncate">
+                                {proj.aspectRatio} · {proj.resolution} · {proj.clips.length} clips
+                              </div>
+                              <div className="text-xs text-slate-500 truncate">
+                                {new Date(proj.updatedAt).toLocaleDateString()}{' '}
+                                {new Date(proj.updatedAt).toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Quick Export + 3-Dot Action Menu Buttons */}
+                            <div className="relative flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openEditorWithProject(proj);
+                                  setExportedVideoUrl(null);
+                                  setExportedVideoBlob(null);
+                                  setExportProgress(0);
+                                  setShowExportModal(true);
+                                }}
+                                title={t(lang, 'btnExportSmall')}
+                                aria-label={`Export ${proj.name}`}
+                                className="min-h-[38px] px-2.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center gap-1"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                                <span>{t(lang, 'btnExportSmall')}</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenMenuProjectId(isMenuOpen ? null : proj.id);
+                                }}
+                                aria-label="Project options menu"
+                                className="min-w-[40px] min-h-[40px] rounded-lg hover:bg-slate-800 text-slate-300 flex items-center justify-center"
+                              >
+                                <MoreVertical className="w-4 h-4" />
+                              </button>
+
+                              {isMenuOpen && (
+                                <div className="absolute right-0 top-11 z-30 w-40 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1 text-xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setOpenMenuProjectId(null);
+                                      openEditorWithProject(proj);
+                                      setExportedVideoUrl(null);
+                                      setExportedVideoBlob(null);
+                                      setExportProgress(0);
+                                      setShowExportModal(true);
+                                    }}
+                                    className="w-full min-h-[40px] px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 text-amber-300 font-semibold"
+                                  >
+                                    <Download className="w-3.5 h-3.5 text-amber-400" />
+                                    <span>{t(lang, 'btnExportSmall')}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRenameInputVal(proj.name);
+                                      setRenamingProjectId(proj.id);
+                                      setOpenMenuProjectId(null);
+                                    }}
+                                    className="w-full min-h-[40px] px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 text-slate-200"
+                                  >
+                                    <Pencil className="w-3.5 h-3.5 text-amber-400" />
+                                    <span>{t(lang, 'menuRename')}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const dup: ProjectData = {
+                                        ...proj,
+                                        id: `proj-dup-${Date.now()}`,
+                                        name: `${proj.name} (Copy)`,
+                                        updatedAt: new Date().toISOString(),
+                                      };
+                                      await saveProjectToStorage(dup);
+                                      setProjects((prev) => [dup, ...prev]);
+                                      setOpenMenuProjectId(null);
+                                      triggerToast('Project duplicated.', 'प्रोजेक्ट डुप्लिकेट किया गया।');
+                                    }}
+                                    className="w-full min-h-[40px] px-3 py-2 text-left hover:bg-slate-800 flex items-center gap-2 text-slate-200"
+                                  >
+                                    <Copy className="w-3.5 h-3.5 text-sky-400" />
+                                    <span>{t(lang, 'menuDuplicate')}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDeleteTargetProject(proj);
+                                      setOpenMenuProjectId(null);
+                                    }}
+                                    className="w-full min-h-[40px] px-3 py-2 text-left hover:bg-rose-950/60 flex items-center gap-2 text-rose-400"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{t(lang, 'menuDelete')}</span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* TEMPLATES TAB (Includes the optional "Sample project" demo + creator templates) */}
+            {homeTab === 'templates' && (
+              <div className="space-y-4">
+                <div>
+                  <h2 className="text-base font-bold text-slate-100">
+                    {t(lang, 'tabTemplates')}
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    1-tap templates with non-destructive Adjustment & Effect Overlay Layers.
+                  </p>
+                </div>
+
+                {/* Optional Sample Project Card (kept here instead of auto-opening on launch) */}
+                <div className="p-4 rounded-xl bg-[#0E131F] border border-amber-500/40 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-xs font-semibold">
+                      {t(lang, 'sampleProjectBadge')}
+                    </span>
+                    <span className="font-mono text-xs text-slate-400">9:16 · 9.5s · 7 Tracks</span>
+                  </div>
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-bold text-slate-100">{INITIAL_PROJECT.name}</h3>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      Full 7-track showcase with Warm Golden Hour Adjustment Layer, Light Leak FX Overlay, PIP, and Devanagari captions.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLoadSampleDemoProject}
+                    className="w-full min-h-[44px] rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs flex items-center justify-center gap-1.5"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>Open Sample Project</span>
+                  </button>
+                </div>
+
+                {/* Creator Templates */}
+                <div className="grid grid-cols-1 gap-3">
+                  {TEMPLATE_PRESETS.map((tpl) => (
+                    <div
+                      key={tpl.id}
+                      className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-3"
+                    >
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span>{tpl.category}</span>
+                        <span className="font-mono">
+                          {tpl.aspectRatio} · {tpl.duration}s · {tpl.bpm} BPM
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="text-sm font-bold text-slate-100">
+                          {lang === 'hi' ? tpl.nameHi : tpl.nameEn}
+                        </h3>
+                        <p className="text-xs text-slate-400 leading-relaxed">
+                          {lang === 'hi' ? tpl.descriptionHi : tpl.descriptionEn}
                         </p>
                       </div>
                       <button
                         type="button"
-                        onClick={() => lutInputRef.current?.click()}
-                        className="min-h-[34px] px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-semibold text-xs shrink-0"
+                        onClick={() => handleLoadTemplate(tpl)}
+                        className="w-full min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-semibold text-xs flex items-center justify-center gap-1.5"
                       >
-                        {t(lang, 'importLut')}
+                        <Play className="w-3.5 h-3.5 fill-current text-amber-400" />
+                        <span>{lang === 'hi' ? 'टेम्पलेट लोड करें' : 'Use Template'}</span>
                       </button>
                     </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      {FILTER_PRESETS.map((flt) => {
-                        const active = selectedClip?.filterPreset === flt.id;
-                        return (
-                          <button
-                            key={flt.id}
-                            type="button"
-                            onClick={() => updateSelectedClip({ filterPreset: flt.id })}
-                            className={`p-2.5 rounded-lg border text-left transition-colors ${
-                              active
-                                ? 'bg-amber-500/15 border-amber-500 text-amber-300'
-                                : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
-                            }`}
-                          >
-                            <div className="text-xs font-semibold">
-                              {lang === 'hi' ? flt.nameHi : flt.nameEn}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* TAB 7: KEYFRAMES, CUSTOM MASKS, CHROMA KEY & BG REMOVER   */}
-                {/* ========================================================= */}
-                {activeTool === 'keyframes' && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-sm font-semibold text-slate-100">
-                        {t(lang, 'toolKeyframes')}
-                      </h2>
-                      <button
-                        type="button"
-                        onClick={handleAddKeyframeAtPlayhead}
-                        disabled={!selectedClip}
-                        className="min-h-[34px] px-3 py-1 rounded bg-amber-500 text-slate-950 font-semibold text-xs"
-                      >
-                        {t(lang, 'btnAddKeyframe')}
-                      </button>
-                    </div>
-
-                    {selectedClip ? (
-                      <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Scale ({selectedClip.scale.toFixed(2)}x)
-                            </label>
-                            <input
-                              type="range"
-                              min={0.25}
-                              max={2.5}
-                              step={0.05}
-                              value={selectedClip.scale}
-                              onChange={(e) =>
-                                updateSelectedClip({ scale: Number(e.target.value) })
-                              }
-                              className="w-full accent-amber-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Position X / Y ({selectedClip.posX}%, {selectedClip.posY}%)
-                            </label>
-                            <div className="flex gap-1">
-                              <input
-                                type="range"
-                                min={-80}
-                                max={80}
-                                value={selectedClip.posX}
-                                onChange={(e) =>
-                                  updateSelectedClip({ posX: Number(e.target.value) })
-                                }
-                                className="w-1/2 accent-amber-500"
-                              />
-                              <input
-                                type="range"
-                                min={-80}
-                                max={80}
-                                value={selectedClip.posY}
-                                onChange={(e) =>
-                                  updateSelectedClip({ posY: Number(e.target.value) })
-                                }
-                                className="w-1/2 accent-amber-500"
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Masks + Interactive Custom Draw Mask */}
-                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-semibold text-slate-200">
-                              {t(lang, 'maskShape')}
-                            </span>
-                            <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={selectedClip.maskInvert}
-                                onChange={(e) =>
-                                  updateSelectedClip({ maskInvert: e.target.checked })
-                                }
-                                className="accent-amber-500"
-                              />
-                              <span>{t(lang, 'maskInvert')}</span>
-                            </label>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-1.5">
-                            {(
-                              [
-                                'none',
-                                'linear',
-                                'circle',
-                                'rectangle',
-                                'heart',
-                                'star',
-                                'custom-draw',
-                              ] as MaskShapeType[]
-                            ).map((shape) => (
-                              <button
-                                key={shape}
-                                type="button"
-                                onClick={() => {
-                                  updateSelectedClip({ maskShape: shape });
-                                  setIsDrawingCustomMask(shape === 'custom-draw');
-                                  if (shape === 'custom-draw') {
-                                    triggerToast(
-                                      'Click 3 or more points directly on the video preview canvas to draw your custom polygon mask!',
-                                      'कस्टम मास्क बनाने के लिए वीडियो प्रीव्यू कैनवस पर 3 या अधिक पॉइंट्स क्लिक करें!'
-                                    );
-                                  }
-                                }}
-                                className={`py-1.5 px-2 rounded border text-[11px] capitalize ${
-                                  selectedClip.maskShape === shape
-                                    ? 'bg-amber-500/20 border-amber-400 text-amber-300 font-semibold'
-                                    : 'bg-slate-950 border-slate-800 text-slate-300'
-                                }`}
-                              >
-                                {shape}
-                              </button>
-                            ))}
-                          </div>
-
-                          {selectedClip.maskShape === 'custom-draw' && (
-                            <div className="flex items-center justify-between pt-1">
-                              <span className="text-[11px] text-amber-400">
-                                Points: {selectedClip.customMaskPoints?.length || 0} (Click on
-                                preview)
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => updateSelectedClip({ customMaskPoints: [] })}
-                                className="text-[11px] text-rose-400 hover:underline"
-                              >
-                                {t(lang, 'clearCustomMask')}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* AI Background Remover & Chroma Key */}
-                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2.5">
-                          <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
-                            <span>{t(lang, 'bgRemover')}</span>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(selectedClip.bgRemovalEnabled)}
-                              onChange={(e) => {
-                                updateSelectedClip({ bgRemovalEnabled: e.target.checked });
-                                triggerToast(
-                                  'Best-Effort Demo: In-browser foreground subject matte enabled.',
-                                  'बेस्ट-एफर्ट डेमो: इन-ब्राउज़र फोरग्राउंड सब्जेक्ट बैकग्राउंड रिमूवर चालू किया गया।'
-                                );
-                              }}
-                              className="w-4 h-4 accent-amber-500"
-                            />
-                          </label>
-
-                          <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer">
-                            <span>{t(lang, 'chromaKey')}</span>
-                            <input
-                              type="checkbox"
-                              checked={selectedClip.chromaKeyEnabled}
-                              onChange={(e) => {
-                                updateSelectedClip({ chromaKeyEnabled: e.target.checked });
-                                triggerToast(
-                                  'Best-Effort Demo: Chroma Key green screen color tolerance active.',
-                                  'बेस्ट-एफर्ट डेमो: ग्रीन स्क्रीन क्रोमा की चालू किया गया।'
-                                );
-                              }}
-                              className="w-4 h-4 accent-emerald-500"
-                            />
-                          </label>
-
-                          {/* Motion Tracking for Text / Stickers */}
-                          {(selectedClip.trackType === 'text' ||
-                            selectedClip.trackType === 'sticker') && (
-                            <div className="pt-1">
-                              <label className="block text-[11px] text-slate-400 mb-1">
-                                {t(lang, 'motionTrack')}
-                              </label>
-                              <select
-                                value={selectedClip.motionTrackTargetId || ''}
-                                onChange={(e) => {
-                                  updateSelectedClip({
-                                    motionTrackTargetId: e.target.value || undefined,
-                                  });
-                                  triggerToast(
-                                    'Best-Effort Motion Tracking: Text/Sticker now follows target clip keyframe trajectory!',
-                                    'मोशन ट्रैकिंग चालू: टेक्स्ट/स्टिकर अब चुनी गई वीडियो क्लिप के कीफ्रेम पथ का अनुसरण करेगा!'
-                                  );
-                                }}
-                                className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-800 text-xs text-slate-100"
-                              >
-                                <option value="">None (Independent Position)</option>
-                                {project.clips
-                                  .filter(
-                                    (c) => c.trackType === 'video' || c.trackType === 'overlay'
-                                  )
-                                  .map((vc) => (
-                                    <option key={vc.id} value={vc.id}>
-                                      Follow: {vc.title}
-                                    </option>
-                                  ))}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-slate-400">Select a clip on the timeline.</div>
-                    )}
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* TAB 8: SPEED CURVES, STABILIZATION & ASPECT RATIO         */}
-                {/* ========================================================= */}
-                {activeTool === 'speed' && (
-                  <div className="space-y-4">
-                    {selectedClip && (
-                      <div className="p-3.5 rounded-lg bg-slate-900 border border-slate-800 space-y-3">
-                        <div className="flex justify-between text-xs">
-                          <span className="text-slate-300">Clip Speed</span>
-                          <span className="font-mono tabular-nums text-amber-400 font-semibold">
-                            {selectedClip.speed}x
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min={0.2}
-                          max={4.0}
-                          step={0.1}
-                          value={selectedClip.speed}
-                          onChange={(e) =>
-                            updateSelectedClip({ speed: Number(e.target.value) })
-                          }
-                          className="w-full accent-amber-500"
-                        />
-
-                        <div className="grid grid-cols-2 gap-2">
-                          {(
-                            [
-                              { id: 'normal', label: 'Linear Normal' },
-                              { id: 'montage', label: 'Velocity Montage' },
-                              { id: 'hero-bullet', label: 'Hero Slow-Mo' },
-                              { id: 'jump-cut', label: 'Jump Velocity' },
-                            ] as { id: SpeedCurvePreset; label: string }[]
-                          ).map((preset) => (
-                            <button
-                              key={preset.id}
-                              type="button"
-                              onClick={() => updateSelectedClip({ speedCurve: preset.id })}
-                              className={`py-1.5 px-2 rounded border text-xs ${
-                                selectedClip.speedCurve === preset.id
-                                  ? 'bg-amber-500/20 border-amber-400 text-amber-300'
-                                  : 'bg-slate-950 border-slate-800 text-slate-300'
-                              }`}
-                            >
-                              {preset.label}
-                            </button>
-                          ))}
-                        </div>
-
-                        <label className="flex items-center justify-between text-xs text-slate-200 cursor-pointer pt-1">
-                          <span>{t(lang, 'stabilization')}</span>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(selectedClip.stabilizationEnabled)}
-                            onChange={(e) => {
-                              updateSelectedClip({ stabilizationEnabled: e.target.checked });
-                              triggerToast(
-                                'Best-Effort Optical Stabilization: Applied 6% horizon buffer crop.',
-                                'वीडियो स्टेबलाइज़ेशन चालू: 6% ऑप्टिकल क्रॉप बफर लागू किया गया।'
-                              );
-                            }}
-                            className="w-4 h-4 accent-amber-500"
-                          />
-                        </label>
-
-                        <div className="flex items-center gap-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              updateSelectedClip({
-                                rotation: (selectedClip.rotation + 90) % 360,
-                              })
-                            }
-                            className="flex-1 min-h-[34px] py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 text-xs flex items-center justify-center gap-1"
-                          >
-                            <RotateCw className="w-3.5 h-3.5" />
-                            <span>90°</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => updateSelectedClip({ flipH: !selectedClip.flipH })}
-                            className="flex-1 min-h-[34px] py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 text-xs flex items-center justify-center gap-1"
-                          >
-                            <FlipHorizontal className="w-3.5 h-3.5" />
-                            <span>Mirror H</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => updateSelectedClip({ flipV: !selectedClip.flipV })}
-                            className="flex-1 min-h-[34px] py-1 px-2 rounded bg-slate-800 hover:bg-slate-700 text-xs flex items-center justify-center gap-1"
-                          >
-                            <FlipVertical className="w-3.5 h-3.5" />
-                            <span>Flip V</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      <div className="text-xs font-medium text-slate-300">Aspect Ratio</div>
-                      <div className="grid grid-cols-3 gap-2">
-                        {ASPECT_RATIOS.map((ar) => (
-                          <button
-                            key={ar}
-                            type="button"
-                            onClick={() =>
-                              updateProjectWithHistory((prev) => ({ ...prev, aspectRatio: ar }))
-                            }
-                            className={`py-2 px-3 rounded-lg border font-mono tabular-nums text-xs font-medium ${
-                              project.aspectRatio === ar
-                                ? 'bg-amber-500 text-slate-950 border-amber-400 font-semibold'
-                                : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
-                            }`}
-                          >
-                            {ar}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Right / Center Column (7 cols): Live Preview Canvas + Transport Controls (order-1 on portrait phone) */}
-            <div className="order-1 lg:order-2 lg:col-span-7 flex flex-col items-center justify-between p-3 sm:p-4 bg-[#070A10] relative overflow-hidden">
-              <div className="w-full flex items-center justify-between gap-4 text-xs text-slate-400 pb-2">
-                <div className="flex items-center gap-2 truncate">
-                  <span className="font-semibold text-slate-200 truncate">{project.name}</span>
-                  <span>·</span>
-                  <span className="font-mono tabular-nums">{project.aspectRatio}</span>
-                  <span>·</span>
-                  <span className="font-mono tabular-nums">{project.resolution}</span>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setShowChecklistModal(true)}
-                    className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs"
-                  >
-                    {t(lang, 'featureChecklistBtn')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      updateProjectWithHistory((prev) => ({
-                        ...prev,
-                        isProUnlocked: !prev.isProUnlocked,
-                        watermarkEnabled: prev.isProUnlocked,
-                      }))
-                    }
-                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors whitespace-nowrap ${
-                      project.isProUnlocked
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    }`}
-                  >
-                    {project.isProUnlocked ? 'Pro Active (No Watermark)' : 'Free Mode'}
-                  </button>
+                  ))}
                 </div>
               </div>
+            )}
+          </main>
 
-              {/* Center HTML5 Video Compositor Canvas */}
-              <div className="flex-1 flex items-center justify-center w-full my-1 overflow-hidden">
-                <div className="relative max-h-[325px] sm:max-h-[375px] flex items-center justify-center rounded-xl overflow-hidden border border-slate-800 shadow-2xl bg-black">
-                  <canvas
-                    ref={canvasRef}
-                    onPointerDown={handleCanvasPointerDown}
-                    className={`max-h-[320px] sm:max-h-[370px] w-auto object-contain ${
-                      isDrawingCustomMask ? 'cursor-crosshair' : ''
-                    }`}
-                  />
-                </div>
-              </div>
+          {/* Home Bottom Navigation Bar (Home, Templates, Projects) */}
+          <nav className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/90 bg-[#070A10] shrink-0">
+            {(
+              [
+                { id: 'home' as const, icon: Home, label: t(lang, 'tabHome') },
+                { id: 'templates' as const, icon: LayoutGrid, label: t(lang, 'tabTemplates') },
+                { id: 'projects' as const, icon: FolderOpen, label: t(lang, 'tabProjects') },
+              ]
+            ).map((tab) => {
+              const Icon = tab.icon;
+              const active = homeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setHomeTab(tab.id)}
+                  aria-label={tab.label}
+                  className={`min-h-[48px] rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors ${
+                    active ? 'text-amber-400 bg-amber-500/10 font-semibold' : 'text-slate-400'
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  <span className="text-xs">{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      )}
 
-              {/* Playback Transport Bar */}
-              <div className="w-full max-w-full flex flex-wrap items-center justify-between gap-4 px-3 py-2 rounded-xl bg-[#0F1522] border border-slate-800/90 min-w-0">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsPlaying(false);
-                      setPlayheadTime(0);
-                    }}
-                    className="p-2 rounded-lg hover:bg-slate-800 text-slate-300"
-                    title="Jump to Start"
-                  >
-                    <SkipBack className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsPlaying((p) => !p)}
-                    className="min-h-[38px] min-w-[38px] rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center transition-colors"
-                    title="Play / Pause (Space)"
-                  >
-                    {isPlaying ? (
-                      <Pause className="w-4 h-4 fill-current" />
-                    ) : (
-                      <Play className="w-4 h-4 fill-current ml-0.5" />
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsPlaying(false);
-                      setPlayheadTime(totalDuration);
-                    }}
-                    className="p-2 rounded-lg hover:bg-slate-800 text-slate-300"
-                    title="Jump to End"
-                  >
-                    <SkipForward className="w-4 h-4" />
-                  </button>
-                </div>
+      {/* ===================================================================== */}
+      {/* SCREEN 2: FULL-SCREEN MEDIA PICKER (For New Project)                  */}
+      {/* ===================================================================== */}
+      {screen === 'picker' && (
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+          <header className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 shrink-0">
+            <button
+              type="button"
+              onClick={() => setScreen('home')}
+              aria-label="Back to Home"
+              className="min-w-[44px] min-h-[44px] rounded-xl bg-slate-900 text-slate-200 flex items-center justify-center shrink-0"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <h1 className="text-base font-bold text-slate-100 truncate">
+              {t(lang, 'pickerTitle')}
+            </h1>
+            <button
+              type="button"
+              onClick={() => openEditorWithProject(projects[0] || project)}
+              className="min-h-[40px] px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold text-xs shrink-0"
+            >
+              {lang === 'hi' ? 'एडिटर खोलें' : 'Skip to Editor'}
+            </button>
+          </header>
 
-                <input
-                  type="range"
-                  min={0}
-                  max={totalDuration}
-                  step={0.03}
-                  value={playheadTime}
-                  onChange={(e) => {
-                    setIsPlaying(false);
-                    setPlayheadTime(Number(e.target.value));
-                  }}
-                  className="flex-1 accent-amber-500 cursor-pointer"
-                  aria-label="Playhead Scrubber"
-                />
+          {/* Picker Tabs + Native Phone Gallery Trigger */}
+          <div className="py-3 space-y-3 shrink-0">
+            <button
+              type="button"
+              onClick={() => pickerFileInputRef.current?.click()}
+              className="w-full min-h-[48px] px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-sm flex items-center justify-center gap-2 shadow"
+            >
+              <Upload className="w-4 h-4" />
+              <span>
+                {isImportingFiles ? 'Reading metadata...' : t(lang, 'pickerPickDeviceBtn')}
+              </span>
+            </button>
 
-                <div className="font-mono tabular-nums text-xs text-slate-300 shrink-0 min-w-0 truncate">
-                  {playheadTime.toFixed(2)}s / {totalDuration.toFixed(2)}s
-                </div>
-              </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setPickerTab('device')}
+                className={`min-h-[40px] rounded-lg text-xs font-semibold ${
+                  pickerTab === 'device'
+                    ? 'bg-slate-800 text-amber-400 border border-amber-500/40'
+                    : 'bg-slate-900 text-slate-400'
+                }`}
+              >
+                {t(lang, 'pickerTabDevice')} ({pickerPool.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setPickerTab('starter')}
+                className={`min-h-[40px] rounded-lg text-xs font-semibold ${
+                  pickerTab === 'starter'
+                    ? 'bg-slate-800 text-amber-400 border border-amber-500/40'
+                    : 'bg-slate-900 text-slate-400'
+                }`}
+              >
+                {t(lang, 'pickerTabStarter')} ({STARTER_MEDIA_LIBRARY.length})
+              </button>
             </div>
           </div>
 
-          {/* Bottom 7-Track Interactive Timeline */}
+          {/* Media Grid with Thumbnail, Duration & Numbered Selection Badge */}
+          <div className="flex-1 overflow-y-auto py-1 min-h-0">
+            {pickerTab === 'device' ? (
+              pickerPool.length === 0 ? (
+                <div className="p-6 rounded-2xl bg-[#0E131F] border border-slate-800 text-center space-y-3 my-3">
+                  <ImageIcon className="w-8 h-8 text-slate-500 mx-auto" />
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    {t(lang, 'pickerEmptyDevice')}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setPickerTab('starter')}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold text-xs"
+                  >
+                    {lang === 'hi'
+                      ? 'या बिल्ट-इन स्टार्टर क्लिप्स चुनें →'
+                      : 'Or Browse Built-in Starter Clips →'}
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-3 gap-2.5">
+                  {pickerPool.map((item) => {
+                    const selIndex = pickerSelectedIds.indexOf(item.id);
+                    const isSelected = selIndex >= 0;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => togglePickerItemSelection(item.id)}
+                        className={`relative aspect-[9/16] rounded-xl overflow-hidden border-2 bg-slate-900 text-left ${
+                          isSelected ? 'border-amber-400' : 'border-slate-800'
+                        }`}
+                      >
+                        {item.thumbnailUrl ? (
+                          <img
+                            src={item.thumbnailUrl}
+                            alt={item.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-xs text-slate-400 p-2 text-center">
+                            {item.name}
+                          </div>
+                        )}
+                        {/* Numbered Selection Badge */}
+                        <div
+                          className={`absolute top-2 right-2 w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center shadow ${
+                            isSelected
+                              ? 'bg-amber-400 text-slate-950'
+                              : 'bg-black/60 text-white border border-white/40'
+                          }`}
+                        >
+                          {isSelected ? selIndex + 1 : ''}
+                        </div>
+                        {/* Duration & Name */}
+                        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-2">
+                          <div className="text-xs font-medium text-white truncate">{item.name}</div>
+                          <div className="font-mono text-[11px] text-amber-300">
+                            {item.duration.toFixed(1)}s
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )
+            ) : (
+              <div className="grid grid-cols-2 gap-2.5">
+                {STARTER_MEDIA_LIBRARY.map((item) => {
+                  const selIndex = pickerSelectedIds.indexOf(item.id);
+                  const isSelected = selIndex >= 0;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => togglePickerItemSelection(item.id)}
+                      className={`relative p-3.5 rounded-xl border-2 bg-[#0E131F] text-left space-y-2 ${
+                        isSelected ? 'border-amber-400' : 'border-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-mono text-amber-400">{item.duration}s</span>
+                        <div
+                          className={`w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center ${
+                            isSelected
+                              ? 'bg-amber-400 text-slate-950'
+                              : 'bg-slate-800 text-slate-400 border border-slate-700'
+                          }`}
+                        >
+                          {isSelected ? selIndex + 1 : '+'}
+                        </div>
+                      </div>
+                      <div className="text-sm font-bold text-slate-100 line-clamp-1">
+                        {lang === 'hi' ? item.titleHi : item.title}
+                      </div>
+                      <div className="text-xs text-slate-400">{item.category}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Bottom "Add (N)" Bar */}
+          <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-3 shrink-0">
+            <div className="text-xs text-slate-300">
+              <span className="font-bold text-amber-400">{pickerSelectedIds.length}</span>{' '}
+              {t(lang, 'pickerSelectedCount')}
+            </div>
+            <button
+              type="button"
+              disabled={pickerSelectedIds.length === 0}
+              onClick={handleConfirmMediaPickerAdd}
+              className="min-h-[48px] px-6 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-bold text-sm flex items-center gap-2"
+            >
+              <span>
+                {t(lang, 'pickerAddBtn')} ({pickerSelectedIds.length})
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SCREEN 3: SETTINGS SCREEN (Language, Pro Mode, PRD Spec, Checklist)   */}
+      {/* ===================================================================== */}
+      {screen === 'settings' && (
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+          <header className="flex items-center justify-between gap-2 pb-3 border-b border-slate-800 shrink-0">
+            <button
+              type="button"
+              onClick={() => setScreen('home')}
+              aria-label="Back to Home"
+              className="min-w-[44px] min-h-[44px] rounded-xl bg-slate-900 text-slate-200 flex items-center justify-center"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <h1 className="text-base font-bold text-slate-100 truncate">
+              {t(lang, 'settingsTitle')}
+            </h1>
+            <div className="w-11" />
+          </header>
+
+          <div className="flex-1 overflow-y-auto py-4 space-y-4">
+            {/* Language Switcher */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+                <Globe className="w-4 h-4 text-amber-400" />
+                <span>{t(lang, 'settingsLanguage')}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                {SUPPORTED_LANGUAGES.map((l) => (
+                  <button
+                    key={l.code}
+                    type="button"
+                    onClick={() => setLang(l.code)}
+                    className={`min-h-[44px] px-3 py-2 rounded-xl border text-xs font-semibold ${
+                      lang === l.code
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-slate-900 border-slate-800 text-slate-200'
+                    }`}
+                  >
+                    {l.nativeLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Pro / Watermark Toggle */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 flex items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <div className="text-sm font-bold text-slate-100">{t(lang, 'settingsProMode')}</div>
+                <div className="text-xs text-slate-400">
+                  Disables watermark on exports and unlocks 2K/4K presets.
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={globalProUnlocked}
+                onChange={(e) => {
+                  const val = e.target.checked;
+                  setGlobalProUnlocked(val);
+                  setProject((p) => ({
+                    ...p,
+                    isProUnlocked: val,
+                    watermarkEnabled: !val,
+                  }));
+                }}
+                aria-label="Toggle Pro Mode"
+                className="w-5 h-5 accent-amber-500 cursor-pointer shrink-0"
+              />
+            </div>
+
+            {/* Studio Blueprint & Checklist Links */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-2.5">
+              <button
+                type="button"
+                onClick={() => setScreen('spec')}
+                className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-semibold text-slate-100 flex items-center justify-between"
+              >
+                <span>{t(lang, 'settingsOpenPrd')}</span>
+                <ChevronRight className="w-4 h-4 text-slate-400" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowChecklistModal(true)}
+                className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-semibold text-slate-100 flex items-center justify-between"
+              >
+                <span>{t(lang, 'settingsOpenChecklist')}</span>
+                <ChevronRight className="w-4 h-4 text-slate-400" />
+              </button>
+            </div>
+
+            {/* About & Build Info */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5 text-xs text-slate-400">
+              <div className="font-bold text-slate-200">{t(lang, 'settingsAbout')}</div>
+              <div>App Name: ClipNova (com.clipnova.editor)</div>
+              <div className="font-mono">Build ID: {BUILD_ID}</div>
+              <div>Runtime: Offline Capacitor Android WebView + IndexedDB</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SCREEN 4: MASTER PRODUCT SPEC (PRD) SCREEN (Accessible from Settings) */}
+      {/* ===================================================================== */}
+      {screen === 'spec' && (
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+          <header className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800 shrink-0">
+            <button
+              type="button"
+              onClick={() => setScreen('settings')}
+              aria-label="Back to Settings"
+              className="min-w-[44px] min-h-[44px] rounded-xl bg-slate-900 text-slate-200 flex items-center justify-center"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <h1 className="text-sm font-bold text-slate-100 truncate">{t(lang, 'navSpec')}</h1>
+            <div className="w-11" />
+          </header>
+          <main className="flex-1 overflow-y-auto">
+            <SpecBlueprintView
+              specForm={specForm}
+              onChangeSpecForm={setSpecForm}
+              onOpenEditor={() => setScreen('home')}
+            />
+          </main>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SCREEN 5: CAPCUT-STYLE PHONE EDITOR WORKSPACE (Section B)             */}
+      {/* ===================================================================== */}
+      {screen === 'editor' && (
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden relative">
+          {/* 1. COMPACT TOP BAR: Back arrow, Project Name (tap to rename), Small Export button */}
+          <header className="h-11 flex items-center justify-between gap-2 pb-1.5 border-b border-slate-800/90 shrink-0 min-w-0">
+            <button
+              type="button"
+              onClick={async () => {
+                setIsPlaying(false);
+                setActiveSheetTool(null);
+                await persistCurrentProject(project, true);
+                setScreen('home');
+              }}
+              aria-label={t(lang, 'btnBackHome')}
+              className="min-w-[44px] min-h-[40px] rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 flex items-center justify-center shrink-0"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+
+            <div className="flex-1 min-w-0 flex items-center justify-center">
+              {isEditingHeaderTitle ? (
+                <input
+                  type="text"
+                  value={project.name}
+                  onChange={(e) => setProject((p) => ({ ...p, name: e.target.value }))}
+                  onBlur={() => setIsEditingHeaderTitle(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') setIsEditingHeaderTitle(false);
+                  }}
+                  autoFocus
+                  className="w-full max-w-[200px] px-2 py-1 rounded bg-slate-900 border border-amber-500 text-xs font-bold text-center text-slate-100 focus:outline-none"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setIsEditingHeaderTitle(true)}
+                  title={t(lang, 'tapToRename')}
+                  className="max-w-full px-2 py-1 rounded-lg hover:bg-slate-900 flex items-center gap-1.5 min-w-0"
+                >
+                  <span className="text-sm font-bold text-slate-100 truncate">
+                    {project.name}
+                  </span>
+                  <Pencil className="w-3 h-3 text-slate-400 shrink-0" />
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setExportedVideoUrl(null);
+                setExportedVideoBlob(null);
+                setExportProgress(0);
+                setShowExportModal(true);
+              }}
+              aria-label={t(lang, 'btnExportSmall')}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shrink-0 shadow"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{t(lang, 'btnExportSmall')}</span>
+            </button>
+          </header>
+
+          {/* 2. LARGEST AREA: VIDEO PREVIEW CANVAS */}
+          <div className="flex-1 min-h-[140px] flex items-center justify-center bg-[#05070B] relative overflow-hidden my-1 rounded-xl border border-slate-800/80">
+            <canvas
+              ref={canvasRef}
+              onPointerDown={handleCanvasPointerDown}
+              className={`max-h-full max-w-full w-auto h-auto object-contain ${
+                isDrawingCustomMask ? 'cursor-crosshair' : ''
+              }`}
+            />
+            {isDrawingCustomMask && (
+              <div className="absolute top-2 inset-x-3 bg-amber-500/90 text-slate-950 text-xs font-semibold px-3 py-1 rounded-lg text-center">
+                Tap 3+ points on preview to draw mask ({selectedClip?.customMaskPoints?.length || 0} pts)
+              </div>
+            )}
+          </div>
+
+          {/* 3. SLIM PLAYER BAR: Prev, Play/Pause, Next, Current / Total Time */}
+          <div className="h-10 flex items-center justify-between gap-2 px-2 bg-[#0B0F17] shrink-0 min-w-0">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaying(false);
+                  setPlayheadTime(0);
+                }}
+                aria-label="Jump to start"
+                className="min-w-[40px] min-h-[38px] rounded-lg hover:bg-slate-800 text-slate-300 flex items-center justify-center"
+              >
+                <SkipBack className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsPlaying((p) => !p)}
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+                className="min-w-[42px] min-h-[38px] rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center"
+              >
+                {isPlaying ? (
+                  <Pause className="w-4 h-4 fill-current" />
+                ) : (
+                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaying(false);
+                  setPlayheadTime(totalDuration);
+                }}
+                aria-label="Jump to end"
+                className="min-w-[40px] min-h-[38px] rounded-lg hover:bg-slate-800 text-slate-300 flex items-center justify-center"
+              >
+                <SkipForward className="w-4 h-4" />
+              </button>
+            </div>
+
+            <input
+              type="range"
+              min={0}
+              max={totalDuration}
+              step={0.03}
+              value={playheadTime}
+              onChange={(e) => {
+                setIsPlaying(false);
+                setPlayheadTime(Number(e.target.value));
+              }}
+              aria-label="Playhead Scrubber"
+              className="flex-1 accent-amber-500 cursor-pointer min-w-0"
+            />
+
+            <div className="font-mono tabular-nums text-xs text-slate-300 shrink-0">
+              <span className="text-amber-400 font-semibold">{playheadTime.toFixed(1)}s</span>
+              <span className="mx-0.5 text-slate-600">/</span>
+              <span>{totalDuration.toFixed(1)}s</span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setExportedVideoUrl(null);
+                setExportedVideoBlob(null);
+                setExportProgress(0);
+                setShowExportModal(true);
+              }}
+              aria-label={t(lang, 'btnExportSmall')}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300 font-bold text-xs flex items-center gap-1 shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{t(lang, 'btnExportSmall')}</span>
+            </button>
+          </div>
+
+          {/* 4. TIMELINE (with compact scrollable action row & pinch zoom) */}
           <TimelinePanel
             lang={lang}
             clips={project.clips}
@@ -3021,6 +2540,7 @@ export function App() {
             magneticSnap={magneticSnap}
             canUndo={historyPast.length > 0}
             canRedo={historyFuture.length > 0}
+            scrollToTimeTrigger={scrollToTimeTrigger}
             onSelectClip={setSelectedClipId}
             onSeek={(tVal) => {
               setIsPlaying(false);
@@ -3039,10 +2559,6 @@ export function App() {
                   c.id === clipId ? { ...c, transitionIn: transition } : c
                 ),
               }));
-              triggerToast(
-                `Applied "${transition}" transition to clip.`,
-                `क्लिप पर "${transition}" ट्रांज़िशन लगाया गया।`
-              );
             }}
             onAutoBeatCut={handleAutoBeatCut}
             onSplitAtPlayhead={handleSplitAtPlayhead}
@@ -3054,57 +2570,1508 @@ export function App() {
             onUpdateClipTiming={handleUpdateClipTiming}
             onToggleTrackMute={handleToggleTrackMute}
           />
+
+          {/* 5. SINGLE OPEN BOTTOM SHEET PANEL (~40% height, above bottom toolbar, preview & timeline stay visible) */}
+          {activeSheetTool !== null && (
+            <div className="h-[38dvh] max-h-[320px] bg-[#0E131F] border-t-2 border-amber-500/50 rounded-t-2xl flex flex-col shrink-0 z-30 shadow-2xl overflow-hidden">
+              {/* Sheet Header with Drag Handle + Close X */}
+              <div className="flex items-center justify-between px-3.5 py-2 border-b border-slate-800/90 bg-[#090D14] shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-6 h-1 rounded-full bg-slate-700" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400 truncate">
+                    {t(
+                      lang,
+                      `bar${activeSheetTool.charAt(0).toUpperCase()}${activeSheetTool.slice(1)}`
+                    )}
+                  </span>
+                  {selectedClip && (
+                    <span className="text-xs text-slate-400 truncate">
+                      · {selectedClip.title}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsDrawingCustomMask(false);
+                    setActiveSheetTool(null);
+                  }}
+                  aria-label="Close tool panel"
+                  className="min-w-[40px] min-h-[36px] rounded-lg hover:bg-slate-800 text-slate-300 flex items-center justify-center shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Scrollable Sheet Body */}
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 min-h-0">
+                {/* ========================================================= */}
+                {/* SHEET 1: EDIT (Media Grid + Transform + Smart AI Tools)   */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'edit' && (
+                  <div className="space-y-2.5">
+                    {/* Accordion 1: Media Import & Project Media Grid */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setEditAccordion('media')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>Media Library & Gallery Import</span>
+                        {editAccordion === 'media' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {editAccordion === 'media' && (
+                        <div className="p-3 pt-0 space-y-3 border-t border-slate-800/60">
+                          <div className="flex items-center gap-2 pt-2">
+                            <button
+                              type="button"
+                              onClick={() => editorMediaInputRef.current?.click()}
+                              className="flex-1 min-h-[44px] px-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                            >
+                              <Upload className="w-4 h-4" />
+                              <span>+ Import Video / Photo</span>
+                            </button>
+                          </div>
+
+                          {/* Imported Media Thumbnail Grid */}
+                          {project.importedMedia && project.importedMedia.length > 0 && (
+                            <div className="space-y-1.5">
+                              <div className="text-xs font-medium text-slate-400">
+                                Imported Media ({project.importedMedia.length})
+                              </div>
+                              <div className="grid grid-cols-4 gap-2">
+                                {project.importedMedia.map((m) => (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    onClick={() => {
+                                      const endT = project.clips
+                                        .filter((c) => c.trackType === 'video')
+                                        .reduce((mx, c) => Math.max(mx, c.startTime + c.duration), 0);
+                                      const newId = `clip-readd-${Date.now()}`;
+                                      const newClip = createBaseClip({
+                                        id: newId,
+                                        trackId: 'track-video-main',
+                                        trackType: 'video',
+                                        title: m.name,
+                                        startTime: Number(endT.toFixed(2)),
+                                        duration: m.duration,
+                                        sourceType:
+                                          m.kind === 'image'
+                                            ? 'uploaded-image'
+                                            : m.kind === 'video'
+                                            ? 'uploaded-video'
+                                            : 'procedural-scene',
+                                        scenePreset: m.scenePreset,
+                                        mediaUrl: m.mediaUrl,
+                                        mediaBlobId: m.mediaBlobId,
+                                        thumbnailUrl: m.thumbnailUrl,
+                                      });
+                                      updateProjectWithHistory((prev) => ({
+                                        ...prev,
+                                        clips: [...prev.clips, newClip],
+                                      }));
+                                      setSelectedClipId(newId);
+                                      setScrollToTimeTrigger({ time: endT, seq: Date.now() });
+                                      triggerToast(`Added ${m.name} to Main Video track`);
+                                    }}
+                                    className="relative aspect-square rounded-lg overflow-hidden border border-slate-700 bg-slate-950"
+                                  >
+                                    {m.thumbnailUrl ? (
+                                      <img
+                                        src={m.thumbnailUrl}
+                                        alt={m.name}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center text-[11px] text-slate-300 p-1 truncate">
+                                        {m.name}
+                                      </div>
+                                    )}
+                                    <span className="absolute bottom-0.5 right-0.5 px-1 rounded bg-black/80 font-mono text-[10px] text-amber-300">
+                                      {m.duration.toFixed(1)}s
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Accordion 2: Transform, Scale, Position & Flip */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setEditAccordion('transform')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>{t(lang, 'accClipTransform')}</span>
+                        {editAccordion === 'transform' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {editAccordion === 'transform' && selectedClip && (
+                        <div className="p-3 pt-1 space-y-2 border-t border-slate-800/60">
+                          <div className="grid grid-cols-3 gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateSelectedClip({
+                                  rotation: (selectedClip.rotation + 90) % 360,
+                                })
+                              }
+                              className="min-h-[44px] rounded-lg bg-slate-800 text-xs font-medium flex items-center justify-center gap-1.5"
+                            >
+                              <RotateCw className="w-4 h-4 text-amber-400" />
+                              <span>Rotate 90°</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateSelectedClip({ flipH: !selectedClip.flipH })}
+                              className="min-h-[44px] rounded-lg bg-slate-800 text-xs font-medium flex items-center justify-center gap-1.5"
+                            >
+                              <FlipHorizontal className="w-4 h-4 text-sky-400" />
+                              <span>Flip H</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => updateSelectedClip({ flipV: !selectedClip.flipV })}
+                              className="min-h-[44px] rounded-lg bg-slate-800 text-xs font-medium flex items-center justify-center gap-1.5"
+                            >
+                              <FlipVertical className="w-4 h-4 text-sky-400" />
+                              <span>Flip V</span>
+                            </button>
+                          </div>
+
+                          {renderTouchSlider({
+                            label: 'Scale / Zoom',
+                            value: Number(selectedClip.scale.toFixed(2)),
+                            min: 0.25,
+                            max: 2.5,
+                            step: 0.05,
+                            defaultValue: 1,
+                            unit: 'x',
+                            onChange: (v) => updateSelectedClip({ scale: v }, true),
+                            onReset: () => updateSelectedClip({ scale: 1 }),
+                          })}
+                          {renderTouchSlider({
+                            label: 'Position X',
+                            value: selectedClip.posX,
+                            min: -80,
+                            max: 80,
+                            defaultValue: 0,
+                            unit: '%',
+                            onChange: (v) => updateSelectedClip({ posX: v }, true),
+                            onReset: () => updateSelectedClip({ posX: 0 }),
+                          })}
+                          {renderTouchSlider({
+                            label: 'Position Y',
+                            value: selectedClip.posY,
+                            min: -80,
+                            max: 80,
+                            defaultValue: 0,
+                            unit: '%',
+                            onChange: (v) => updateSelectedClip({ posY: v }, true),
+                            onReset: () => updateSelectedClip({ posY: 0 }),
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Accordion 3: Smart AI (Chroma Key, BG Remover, Stabilization) */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setEditAccordion('smart')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>{t(lang, 'accSmartAi')}</span>
+                        {editAccordion === 'smart' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {editAccordion === 'smart' && selectedClip && (
+                        <div className="p-3 space-y-2.5 border-t border-slate-800/60">
+                          <label className="min-h-[44px] flex items-center justify-between text-xs text-slate-200 cursor-pointer">
+                            <span>{t(lang, 'bgRemover')}</span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(selectedClip.bgRemovalEnabled)}
+                              onChange={(e) =>
+                                updateSelectedClip({ bgRemovalEnabled: e.target.checked })
+                              }
+                              className="w-5 h-5 accent-amber-500"
+                            />
+                          </label>
+                          <label className="min-h-[44px] flex items-center justify-between text-xs text-slate-200 cursor-pointer">
+                            <span>{t(lang, 'chromaKey')}</span>
+                            <input
+                              type="checkbox"
+                              checked={selectedClip.chromaKeyEnabled}
+                              onChange={(e) =>
+                                updateSelectedClip({ chromaKeyEnabled: e.target.checked })
+                              }
+                              className="w-5 h-5 accent-emerald-500"
+                            />
+                          </label>
+                          <label className="min-h-[44px] flex items-center justify-between text-xs text-slate-200 cursor-pointer">
+                            <span>{t(lang, 'stabilization')}</span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(selectedClip.stabilizationEnabled)}
+                              onChange={(e) =>
+                                updateSelectedClip({ stabilizationEnabled: e.target.checked })
+                              }
+                              className="w-5 h-5 accent-amber-500"
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 2: AUDIO (Music, Mic Voiceover, TTS, Voice Changer) */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'audio' && (
+                  <div className="space-y-2.5">
+                    {/* Accordion 1: Music & Device Audio Import */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setAudioAccordion('music')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>{t(lang, 'accMusicLibrary')}</span>
+                        {audioAccordion === 'music' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {audioAccordion === 'music' && (
+                        <div className="p-3 space-y-2.5 border-t border-slate-800/60">
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => audioInputRef.current?.click()}
+                              className="min-h-[44px] px-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                            >
+                              <Upload className="w-4 h-4" />
+                              <span>Import Audio</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleExtractAudioFromVideo}
+                              className="min-h-[44px] px-3 rounded-xl bg-slate-800 text-slate-100 font-semibold text-xs flex items-center justify-center gap-1.5"
+                            >
+                              <Scissors className="w-4 h-4 text-emerald-400" />
+                              <span>{t(lang, 'extractAudio')}</span>
+                            </button>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            {ROYALTY_FREE_AUDIO.map((track) => (
+                              <div
+                                key={track.id}
+                                className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between gap-2"
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-xs font-semibold text-slate-100 truncate">
+                                    {lang === 'hi' ? track.titleHi : track.title}
+                                  </div>
+                                  <div className="text-[11px] font-mono text-slate-400">
+                                    {track.bpm} BPM · Beat Markers
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddAudioTrack(track)}
+                                  className="min-h-[38px] px-3 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold shrink-0"
+                                >
+                                  Use
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Accordion 2: Mic Voiceover & Text-to-Speech */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setAudioAccordion('voice')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>{t(lang, 'accVoiceTts')}</span>
+                        {audioAccordion === 'voice' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {audioAccordion === 'voice' && (
+                        <div className="p-3 space-y-3 border-t border-slate-800/60">
+                          <button
+                            type="button"
+                            onClick={handleToggleVoiceover}
+                            className={`w-full min-h-[44px] rounded-xl font-bold text-xs flex items-center justify-center gap-2 ${
+                              isRecordingVoice
+                                ? 'bg-rose-600 text-white'
+                                : 'bg-slate-800 text-slate-100'
+                            }`}
+                          >
+                            {isRecordingVoice ? (
+                              <MicOff className="w-4 h-4" />
+                            ) : (
+                              <Mic className="w-4 h-4 text-amber-400" />
+                            )}
+                            <span>
+                              {isRecordingVoice
+                                ? `${t(lang, 'stopVoiceover')} (${recordingSeconds}s)`
+                                : t(lang, 'recordVoiceover')}
+                            </span>
+                          </button>
+
+                          <div className="space-y-2 pt-1">
+                            <div className="text-xs font-semibold text-amber-400">
+                              {t(lang, 'ttsTitle')}
+                            </div>
+                            <input
+                              type="text"
+                              value={ttsInputText}
+                              onChange={(e) => setTtsInputText(e.target.value)}
+                              className="w-full min-h-[40px] px-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                            />
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={ttsVoiceLang}
+                                onChange={(e) =>
+                                  setTtsVoiceLang(e.target.value as 'hi-IN' | 'en-IN' | 'en-US')
+                                }
+                                className="min-h-[42px] px-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                              >
+                                <option value="en-IN">English (IN)</option>
+                                <option value="hi-IN">हिन्दी (HI)</option>
+                                <option value="en-US">English (US)</option>
+                              </select>
+                              <button
+                                type="button"
+                                onClick={handleSynthesizeTtsToTimeline}
+                                className="flex-1 min-h-[42px] px-3 rounded-lg bg-amber-500 text-slate-950 font-bold text-xs"
+                              >
+                                {t(lang, 'ttsSpeakBtn')}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Accordion 3: Voice Changer, Volume & Noise Reduction */}
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setAudioAccordion('fx')}
+                        className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                      >
+                        <span>{t(lang, 'accVoiceFx')}</span>
+                        {audioAccordion === 'fx' ? (
+                          <ChevronDown className="w-4 h-4 text-amber-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </button>
+                      {audioAccordion === 'fx' && selectedClip && (
+                        <div className="p-3 space-y-2.5 border-t border-slate-800/60">
+                          {renderTouchSlider({
+                            label: 'Clip Volume',
+                            value: selectedClip.volume,
+                            min: 0,
+                            max: 200,
+                            defaultValue: 100,
+                            unit: '%',
+                            onChange: (v) => updateSelectedClip({ volume: v }, true),
+                            onReset: () => updateSelectedClip({ volume: 100 }),
+                          })}
+                          <div className="grid grid-cols-2 gap-2 items-center">
+                            <select
+                              value={selectedClip.voiceChanger || 'none'}
+                              onChange={(e) =>
+                                updateSelectedClip({
+                                  voiceChanger: e.target.value as VoiceChangerPreset,
+                                })
+                              }
+                              className="min-h-[42px] px-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                            >
+                              <option value="none">Normal Voice</option>
+                              <option value="deep-cinema">Deep Narrator</option>
+                              <option value="chipmunk">Chipmunk</option>
+                              <option value="robot-mod">Cyber Robot</option>
+                              <option value="echo-hall">Stadium Echo</option>
+                            </select>
+                            <label className="min-h-[42px] flex items-center gap-2 text-xs text-slate-200 cursor-pointer px-2">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(selectedClip.noiseReduction)}
+                                onChange={(e) =>
+                                  updateSelectedClip({ noiseReduction: e.target.checked })
+                                }
+                                className="w-4 h-4 accent-emerald-500"
+                              />
+                              <span>{t(lang, 'noiseReduction')}</span>
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 3: TEXT (Devanagari & Latin Fonts, Styles, Track)   */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'text' && (
+                  <div className="space-y-3">
+                    {selectedClip && selectedClip.trackType === 'text' && (
+                      <div className="p-3 rounded-xl bg-slate-900 border border-amber-500/40 space-y-2.5">
+                        <input
+                          type="text"
+                          value={selectedClip.textContent || ''}
+                          onChange={(e) =>
+                            updateSelectedClip({
+                              textContent: e.target.value,
+                              title: e.target.value,
+                            })
+                          }
+                          className="w-full min-h-[42px] px-3 rounded-lg bg-slate-950 border border-slate-800 text-sm text-slate-100"
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <select
+                            value={selectedClip.fontFamily || 'Noto Sans Devanagari'}
+                            onChange={(e) => updateSelectedClip({ fontFamily: e.target.value })}
+                            className="min-h-[42px] px-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                          >
+                            {FONT_FAMILIES.map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.label}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={selectedClip.textAnimation || 'none'}
+                            onChange={(e) =>
+                              updateSelectedClip({
+                                textAnimation: e.target.value as TextAnimationType,
+                              })
+                            }
+                            className="min-h-[42px] px-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                          >
+                            <option value="karaoke-highlight">Karaoke Highlight</option>
+                            <option value="pop-in">Pop In</option>
+                            <option value="typewriter">Typewriter</option>
+                            <option value="slide-up">Slide Up</option>
+                            <option value="none">Static</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 gap-2">
+                      {FONT_FAMILIES.map((f) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => handleAddTextOverlay(f.sample, f.id, 'pop-in')}
+                          className="min-h-[48px] p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 flex items-center justify-between text-left"
+                        >
+                          <div>
+                            <div className="text-xs text-slate-400">{f.label}</div>
+                            <div
+                              style={{ fontFamily: f.id }}
+                              className="text-sm font-bold text-slate-100"
+                            >
+                              {f.sample}
+                            </div>
+                          </div>
+                          <span className="text-xs font-semibold text-amber-400">+ Add</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 4: STICKERS (Emoji & Motion Track)                  */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'stickers' && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-4 gap-2">
+                      {STICKER_PRESETS.map((stk) => (
+                        <button
+                          key={stk.id}
+                          type="button"
+                          onClick={() => handleAddSticker(stk.glyph, stk.label)}
+                          className="min-h-[60px] p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 flex flex-col items-center justify-center gap-1"
+                        >
+                          <span className="text-2xl">{stk.glyph}</span>
+                          <span className="text-[11px] text-slate-300 truncate w-full text-center">
+                            {stk.label}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {selectedClip &&
+                      (selectedClip.trackType === 'sticker' ||
+                        selectedClip.trackType === 'text') && (
+                        <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                          <label className="block text-xs font-semibold text-slate-300">
+                            {t(lang, 'motionTrack')}
+                          </label>
+                          <select
+                            value={selectedClip.motionTrackTargetId || ''}
+                            onChange={(e) =>
+                              updateSelectedClip({
+                                motionTrackTargetId: e.target.value || undefined,
+                              })
+                            }
+                            className="w-full min-h-[42px] px-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                          >
+                            <option value="">None (Independent)</option>
+                            {project.clips
+                              .filter((c) => c.trackType === 'video' || c.trackType === 'overlay')
+                              .map((vc) => (
+                                <option key={vc.id} value={vc.id}>
+                                  Follow: {vc.title}
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+                      )}
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 5: OVERLAY / PIP                                    */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'overlay' && (
+                  <div className="space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => pipOverlayInputRef.current?.click()}
+                      className="w-full min-h-[46px] px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
+                    >
+                      <Layers className="w-4 h-4" />
+                      <span>+ Import PIP Overlay (Video / Photo)</span>
+                    </button>
+
+                    {selectedClip && (
+                      <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <label className="block text-xs font-semibold text-slate-300">
+                          {t(lang, 'blendMode')}
+                        </label>
+                        <select
+                          value={selectedClip.blendMode}
+                          onChange={(e) =>
+                            updateSelectedClip({ blendMode: e.target.value as BlendModeType })
+                          }
+                          className="w-full min-h-[42px] px-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                        >
+                          <option value="source-over">Normal</option>
+                          <option value="screen">Screen</option>
+                          <option value="multiply">Multiply</option>
+                          <option value="overlay">Overlay</option>
+                          <option value="lighter">Add / Linear Dodge</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 6: EFFECTS (Trending Library + Non-Destructive FX)  */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'effects' && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCreateEffectLayer('light-leak', playheadTime)}
+                        className="flex-1 min-h-[44px] px-3 rounded-xl bg-fuchsia-500/20 border border-fuchsia-500/50 text-fuchsia-200 font-bold text-xs flex items-center justify-center gap-1.5"
+                      >
+                        <Sparkles className="w-4 h-4 text-fuchsia-400" />
+                        <span>{t(lang, 'createEffectOverlayLayer')}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowTrendFindings((s) => !s)}
+                        className="min-h-[44px] px-3 rounded-xl bg-slate-900 border border-slate-800 text-amber-300 text-xs font-semibold shrink-0"
+                      >
+                        Trends
+                      </button>
+                    </div>
+
+                    {showTrendFindings && (
+                      <div className="p-3 rounded-xl bg-slate-950 border border-amber-500/40 space-y-1.5 text-xs">
+                        {TRENDING_SEARCH_FINDINGS.map((tf, i) => (
+                          <div key={i} className="border-b border-slate-800/80 pb-1">
+                            <div className="font-bold text-amber-300">
+                              {lang === 'hi' ? tf.trendHi : tf.trendEn}
+                            </div>
+                            <div className="text-slate-400">{tf.builtAs}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={effectSearch}
+                        onChange={(e) => setEffectSearch(e.target.value)}
+                        placeholder={t(lang, 'searchEffectsPlaceholder')}
+                        className="w-full min-h-[40px] pl-8 pr-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                      {(
+                        [
+                          { id: 'All', label: t(lang, 'catAll') },
+                          { id: 'Trending', label: t(lang, 'catTrending') },
+                          { id: 'Glitch & Digital', label: t(lang, 'catGlitch') },
+                          { id: 'Motion & Velocity', label: t(lang, 'catMotion') },
+                          { id: 'Optical & Light', label: t(lang, 'catOptical') },
+                        ] as const
+                      ).map((cat) => (
+                        <button
+                          key={cat.id}
+                          type="button"
+                          onClick={() => setEffectCategory(cat.id)}
+                          className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 ${
+                            effectCategory === cat.id
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'bg-slate-900 text-slate-300'
+                          }`}
+                        >
+                          {cat.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {selectedClip && selectedClip.effect !== 'none' && (
+                      <div className="p-2.5 rounded-xl bg-slate-900 border border-fuchsia-500/40">
+                        {renderTouchSlider({
+                          label: t(lang, 'layerIntensity'),
+                          value: selectedClip.effectIntensity ?? 75,
+                          min: 0,
+                          max: 100,
+                          defaultValue: 75,
+                          unit: '%',
+                          onChange: (v) => updateSelectedClip({ effectIntensity: v }, true),
+                          onReset: () => updateSelectedClip({ effectIntensity: 75 }),
+                        })}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {filteredEffects.map((fx) => (
+                        <div
+                          key={fx.id}
+                          className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-col justify-between gap-2"
+                        >
+                          <div className="text-xs font-bold text-slate-100 truncate">
+                            {lang === 'hi' ? fx.nameHi : fx.nameEn}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleCreateEffectLayer(fx.id, playheadTime)}
+                              className="flex-1 min-h-[38px] rounded-lg bg-fuchsia-500/20 border border-fuchsia-500/40 text-fuchsia-200 text-xs font-semibold"
+                            >
+                              + FX Layer
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!selectedClip}
+                              onClick={() =>
+                                updateSelectedClip({
+                                  effect: fx.id,
+                                  effectIntensity: fx.defaultIntensity,
+                                })
+                              }
+                              className="flex-1 min-h-[38px] rounded-lg bg-slate-800 disabled:opacity-40 text-slate-200 text-xs font-semibold"
+                            >
+                              On Clip
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 7: TRANSITIONS                                      */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'transitions' && (
+                  <div className="space-y-3">
+                    {selectedClip &&
+                      renderTouchSlider({
+                        label: 'Transition Duration',
+                        value: selectedClip.transitionDuration,
+                        min: 0.2,
+                        max: 1.5,
+                        step: 0.1,
+                        defaultValue: 0.5,
+                        unit: 's',
+                        onChange: (v) => updateSelectedClip({ transitionDuration: v }, true),
+                        onReset: () => updateSelectedClip({ transitionDuration: 0.5 }),
+                      })}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {TRANSITIONS_CATALOG.map((tr) => {
+                        const active = selectedClip?.transitionIn === tr.id;
+                        return (
+                          <button
+                            key={tr.id}
+                            type="button"
+                            disabled={!selectedClip}
+                            onClick={() =>
+                              updateSelectedClip({
+                                transitionIn: tr.id,
+                                transitionDuration: tr.defaultDuration || 0.5,
+                              })
+                            }
+                            className={`min-h-[48px] p-2.5 rounded-xl border text-left ${
+                              active
+                                ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                                : 'bg-slate-900 border-slate-800 text-slate-200 disabled:opacity-40'
+                            }`}
+                          >
+                            <div className="text-xs font-bold">
+                              {lang === 'hi' ? tr.nameHi : tr.nameEn}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 8: FILTERS & .CUBE LUT IMPORT                       */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'filters' && (
+                  <div className="space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => lutInputRef.current?.click()}
+                      className="w-full min-h-[44px] px-4 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+                    >
+                      {t(lang, 'importLut')}
+                    </button>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {FILTER_PRESETS.map((flt) => {
+                        const active = selectedClip?.filterPreset === flt.id;
+                        return (
+                          <button
+                            key={flt.id}
+                            type="button"
+                            disabled={!selectedClip}
+                            onClick={() => updateSelectedClip({ filterPreset: flt.id })}
+                            className={`min-h-[46px] p-2.5 rounded-xl border text-left ${
+                              active
+                                ? 'bg-amber-500/20 border-amber-400 text-amber-300 font-bold'
+                                : 'bg-slate-900 border-slate-800 text-slate-200'
+                            }`}
+                          >
+                            <div className="text-xs">{lang === 'hi' ? flt.nameHi : flt.nameEn}</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 9: ADJUST (Non-Destructive Layer + 4 Accordions)    */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'adjust' && (
+                  <div className="space-y-2.5">
+                    <button
+                      type="button"
+                      onClick={handleCreateAdjustmentLayer}
+                      className="w-full min-h-[44px] px-3 rounded-xl bg-cyan-500/20 border border-cyan-500/50 text-cyan-200 font-bold text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <Sliders className="w-4 h-4 text-cyan-400" />
+                      <span>{t(lang, 'createAdjustmentLayer')}</span>
+                    </button>
+
+                    {!selectedClip ? (
+                      <div className="text-xs text-slate-400 p-2">
+                        Tap a clip or Adjustment Layer on the timeline to adjust values.
+                      </div>
+                    ) : (
+                      <>
+                        {/* Group 1: Basic */}
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setAdjustAccordion('basic')}
+                            className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                          >
+                            <span>{t(lang, 'accBasic')}</span>
+                            {adjustAccordion === 'basic' ? (
+                              <ChevronDown className="w-4 h-4 text-cyan-400" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            )}
+                          </button>
+                          {adjustAccordion === 'basic' && (
+                            <div className="p-3 pt-0 border-t border-slate-800/60">
+                              {(
+                                [
+                                  { key: 'brightness', min: -50, max: 50, def: 0 },
+                                  { key: 'contrast', min: -50, max: 50, def: 0 },
+                                  { key: 'saturation', min: -50, max: 50, def: 0 },
+                                  { key: 'exposure', min: -50, max: 50, def: 0 },
+                                ] as { key: keyof ColorAdjustments; min: number; max: number; def: number }[]
+                              ).map((sl) =>
+                                renderTouchSlider({
+                                  label: t(lang, sl.key),
+                                  value: Number(selectedClip.adjustments[sl.key] ?? sl.def),
+                                  min: sl.min,
+                                  max: sl.max,
+                                  defaultValue: sl.def,
+                                  onChange: (val) =>
+                                    updateSelectedClip(
+                                      {
+                                        adjustments: {
+                                          ...selectedClip.adjustments,
+                                          [sl.key]: val,
+                                        },
+                                      },
+                                      true
+                                    ),
+                                  onReset: () =>
+                                    updateSelectedClip({
+                                      adjustments: {
+                                        ...selectedClip.adjustments,
+                                        [sl.key]: sl.def,
+                                      },
+                                    }),
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Group 2: Color & Tone (HSL) */}
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setAdjustAccordion('color')}
+                            className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                          >
+                            <span>{t(lang, 'accColor')}</span>
+                            {adjustAccordion === 'color' ? (
+                              <ChevronDown className="w-4 h-4 text-cyan-400" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            )}
+                          </button>
+                          {adjustAccordion === 'color' && (
+                            <div className="p-3 pt-0 border-t border-slate-800/60">
+                              {(
+                                [
+                                  { key: 'highlights', min: -50, max: 50, def: 0 },
+                                  { key: 'shadows', min: -50, max: 50, def: 0 },
+                                  { key: 'temperature', min: -50, max: 50, def: 0 },
+                                  { key: 'tint', min: -50, max: 50, def: 0 },
+                                  { key: 'hue', min: -180, max: 180, def: 0 },
+                                ] as { key: keyof ColorAdjustments; min: number; max: number; def: number }[]
+                              ).map((sl) =>
+                                renderTouchSlider({
+                                  label: t(lang, sl.key),
+                                  value: Number(selectedClip.adjustments[sl.key] ?? sl.def),
+                                  min: sl.min,
+                                  max: sl.max,
+                                  defaultValue: sl.def,
+                                  onChange: (val) =>
+                                    updateSelectedClip(
+                                      {
+                                        adjustments: {
+                                          ...selectedClip.adjustments,
+                                          [sl.key]: val,
+                                        },
+                                      },
+                                      true
+                                    ),
+                                  onReset: () =>
+                                    updateSelectedClip({
+                                      adjustments: {
+                                        ...selectedClip.adjustments,
+                                        [sl.key]: sl.def,
+                                      },
+                                    }),
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Group 3: Grain, Vignette, Sharpen & Blur */}
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setAdjustAccordion('effects')}
+                            className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                          >
+                            <span>{t(lang, 'accEffects')}</span>
+                            {adjustAccordion === 'effects' ? (
+                              <ChevronDown className="w-4 h-4 text-cyan-400" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            )}
+                          </button>
+                          {adjustAccordion === 'effects' && (
+                            <div className="p-3 pt-0 border-t border-slate-800/60">
+                              {(
+                                [
+                                  { key: 'sharpen', min: 0, max: 100, def: 10 },
+                                  { key: 'vignette', min: 0, max: 100, def: 12 },
+                                  { key: 'grain', min: 0, max: 100, def: 0 },
+                                  { key: 'blur', min: 0, max: 50, def: 0 },
+                                ] as { key: keyof ColorAdjustments; min: number; max: number; def: number }[]
+                              ).map((sl) =>
+                                renderTouchSlider({
+                                  label: t(lang, sl.key),
+                                  value: Number(selectedClip.adjustments[sl.key] ?? sl.def),
+                                  min: sl.min,
+                                  max: sl.max,
+                                  defaultValue: sl.def,
+                                  onChange: (val) =>
+                                    updateSelectedClip(
+                                      {
+                                        adjustments: {
+                                          ...selectedClip.adjustments,
+                                          [sl.key]: val,
+                                        },
+                                      },
+                                      true
+                                    ),
+                                  onReset: () =>
+                                    updateSelectedClip({
+                                      adjustments: {
+                                        ...selectedClip.adjustments,
+                                        [sl.key]: sl.def,
+                                      },
+                                    }),
+                                })
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Group 4: Opacity & Blend Mode */}
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setAdjustAccordion('blend')}
+                            className="w-full min-h-[44px] px-3.5 py-2 flex items-center justify-between text-xs font-bold text-slate-100"
+                          >
+                            <span>{t(lang, 'accBlend')}</span>
+                            {adjustAccordion === 'blend' ? (
+                              <ChevronDown className="w-4 h-4 text-cyan-400" />
+                            ) : (
+                              <ChevronRight className="w-4 h-4 text-slate-400" />
+                            )}
+                          </button>
+                          {adjustAccordion === 'blend' && (
+                            <div className="p-3 space-y-2 border-t border-slate-800/60">
+                              {renderTouchSlider({
+                                label: t(lang, 'opacity'),
+                                value: Math.round(selectedClip.opacity * 100),
+                                min: 5,
+                                max: 100,
+                                defaultValue: 100,
+                                unit: '%',
+                                onChange: (v) => updateSelectedClip({ opacity: v / 100 }, true),
+                                onReset: () => updateSelectedClip({ opacity: 1 }),
+                              })}
+                              <select
+                                value={selectedClip.blendMode}
+                                onChange={(e) =>
+                                  updateSelectedClip({
+                                    blendMode: e.target.value as BlendModeType,
+                                  })
+                                }
+                                className="w-full min-h-[42px] px-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-100"
+                              >
+                                <option value="source-over">Normal (Pass-Through)</option>
+                                <option value="screen">Screen</option>
+                                <option value="multiply">Multiply</option>
+                                <option value="overlay">Overlay</option>
+                                <option value="lighter">Add / Linear Dodge</option>
+                              </select>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 10: CAPTIONS (Hindi, Hinglish, English + SRT)       */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'captions' && (
+                  <div className="space-y-3">
+                    <div className="text-xs font-bold text-amber-400">
+                      AI Auto-Captions (Word-by-Word Karaoke Highlight)
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateAutoCaptions('english')}
+                        className="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-100"
+                      >
+                        English
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateAutoCaptions('hinglish')}
+                        className="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-100"
+                      >
+                        Hinglish
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleGenerateAutoCaptions('hindi')}
+                        className="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-100"
+                      >
+                        हिंदी कैप्शन
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => downloadSrtSubtitles(project)}
+                      className="w-full min-h-[44px] rounded-xl border border-slate-700 bg-slate-900 text-xs font-semibold text-slate-200"
+                    >
+                      Export Captions (.SRT)
+                    </button>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 11: CANVAS / RATIO                                  */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'canvas' && (
+                  <div className="space-y-3">
+                    <div className="text-xs font-bold text-slate-200">Aspect Ratio</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {ASPECT_RATIOS.map((ar) => (
+                        <button
+                          key={ar}
+                          type="button"
+                          onClick={() =>
+                            updateProjectWithHistory((prev) => ({ ...prev, aspectRatio: ar }))
+                          }
+                          className={`min-h-[44px] rounded-xl border font-mono text-xs font-bold ${
+                            project.aspectRatio === ar
+                              ? 'bg-amber-500 text-slate-950 border-amber-400'
+                              : 'bg-slate-900 border-slate-800 text-slate-200'
+                          }`}
+                        >
+                          {ar}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 12: SPEED                                           */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'speed' && selectedClip && (
+                  <div className="space-y-3">
+                    {renderTouchSlider({
+                      label: 'Playback Speed',
+                      value: selectedClip.speed,
+                      min: 0.2,
+                      max: 4.0,
+                      step: 0.1,
+                      defaultValue: 1.0,
+                      unit: 'x',
+                      onChange: (v) => updateSelectedClip({ speed: v }, true),
+                      onReset: () => updateSelectedClip({ speed: 1.0 }),
+                    })}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {(
+                        [
+                          { id: 'normal', label: 'Linear Normal' },
+                          { id: 'montage', label: 'Velocity Montage' },
+                          { id: 'hero-bullet', label: 'Hero Slow-Mo' },
+                          { id: 'jump-cut', label: 'Jump Velocity' },
+                        ] as { id: SpeedCurvePreset; label: string }[]
+                      ).map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => updateSelectedClip({ speedCurve: preset.id })}
+                          className={`min-h-[42px] rounded-xl border text-xs font-semibold ${
+                            selectedClip.speedCurve === preset.id
+                              ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                              : 'bg-slate-900 border-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 13: MASK                                            */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'mask' && selectedClip && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-2">
+                      {(
+                        [
+                          'none',
+                          'linear',
+                          'circle',
+                          'rectangle',
+                          'heart',
+                          'star',
+                          'custom-draw',
+                        ] as MaskShapeType[]
+                      ).map((shape) => (
+                        <button
+                          key={shape}
+                          type="button"
+                          onClick={() => {
+                            updateSelectedClip({ maskShape: shape });
+                            setIsDrawingCustomMask(shape === 'custom-draw');
+                          }}
+                          className={`min-h-[42px] rounded-xl border text-xs capitalize font-semibold ${
+                            selectedClip.maskShape === shape
+                              ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                              : 'bg-slate-900 border-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {shape}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <label className="min-h-[42px] flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedClip.maskInvert}
+                          onChange={(e) => updateSelectedClip({ maskInvert: e.target.checked })}
+                          className="w-4 h-4 accent-amber-500"
+                        />
+                        <span>{t(lang, 'maskInvert')}</span>
+                      </label>
+                      {selectedClip.maskShape === 'custom-draw' && (
+                        <button
+                          type="button"
+                          onClick={() => updateSelectedClip({ customMaskPoints: [] })}
+                          className="min-h-[38px] px-3 rounded-lg bg-rose-950 text-rose-300 text-xs"
+                        >
+                          {t(lang, 'clearCustomMask')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ========================================================= */}
+                {/* SHEET 14: KEYFRAME                                        */}
+                {/* ========================================================= */}
+                {activeSheetTool === 'keyframe' && selectedClip && (
+                  <div className="space-y-3">
+                    <button
+                      type="button"
+                      onClick={handleAddKeyframeAtPlayhead}
+                      className="w-full min-h-[46px] rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <Diamond className="w-4 h-4" />
+                      <span>+ Add Keyframe at Playhead ({playheadTime.toFixed(1)}s)</span>
+                    </button>
+
+                    {selectedClip.keyframes.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-xs text-slate-400">
+                          Active Keyframes ({selectedClip.keyframes.length})
+                        </div>
+                        {selectedClip.keyframes.map((kf) => (
+                          <div
+                            key={kf.id}
+                            className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-between text-xs"
+                          >
+                            <span className="font-mono text-amber-400">
+                              +{kf.timeOffset.toFixed(2)}s ({kf.easing})
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                updateSelectedClip({
+                                  keyframes: selectedClip.keyframes.filter((k) => k.id !== kf.id),
+                                })
+                              }
+                              aria-label="Remove keyframe"
+                              className="min-w-[36px] min-h-[36px] text-rose-400 flex items-center justify-center"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* 6. BOTTOM HORIZONTAL SCROLLABLE TOOL BAR (14 CapCut Tools + Export) */}
+          <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar pt-1.5 border-t border-slate-800/90 bg-[#070A10] shrink-0 min-w-0">
+            {(
+              [
+                { id: 'edit' as const, icon: Scissors, label: t(lang, 'barEdit') },
+                { id: 'audio' as const, icon: Music, label: t(lang, 'barAudio') },
+                { id: 'text' as const, icon: Type, label: t(lang, 'barText') },
+                { id: 'stickers' as const, icon: Smile, label: t(lang, 'barStickers') },
+                { id: 'overlay' as const, icon: Layers, label: t(lang, 'barOverlay') },
+                { id: 'effects' as const, icon: Sparkles, label: t(lang, 'barEffects') },
+                { id: 'transitions' as const, icon: Wand2, label: t(lang, 'barTransitions') },
+                { id: 'filters' as const, icon: Palette, label: t(lang, 'barFilters') },
+                { id: 'adjust' as const, icon: Sliders, label: t(lang, 'barAdjust') },
+                { id: 'captions' as const, icon: Subtitles, label: t(lang, 'barCaptions') },
+                { id: 'canvas' as const, icon: Maximize2, label: t(lang, 'barCanvas') },
+                { id: 'speed' as const, icon: Gauge, label: t(lang, 'barSpeed') },
+                { id: 'mask' as const, icon: Film, label: t(lang, 'barMask') },
+                { id: 'keyframe' as const, icon: Diamond, label: t(lang, 'barKeyframe') },
+              ]
+            ).map((tool) => {
+              const Icon = tool.icon;
+              const isOpen = activeSheetTool === tool.id;
+              return (
+                <button
+                  key={tool.id}
+                  type="button"
+                  onClick={() => {
+                    setIsDrawingCustomMask(false);
+                    setActiveSheetTool(isOpen ? null : tool.id);
+                  }}
+                  aria-label={tool.label}
+                  className={`w-16 min-w-[64px] min-h-[52px] px-1 rounded-xl flex flex-col items-center justify-center gap-1 shrink-0 transition-colors ${
+                    isOpen
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/50 font-bold'
+                      : 'text-slate-300 hover:bg-slate-900'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="text-xs leading-none truncate w-full text-center">
+                    {tool.label}
+                  </span>
+                </button>
+              );
+            })}
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsPlaying(false);
+                setExportedVideoUrl(null);
+                setExportedVideoBlob(null);
+                setExportProgress(0);
+                setShowExportModal(true);
+              }}
+              aria-label={t(lang, 'btnExportSmall')}
+              className="w-16 min-w-[64px] min-h-[52px] px-1 rounded-xl bg-amber-500 text-slate-950 font-bold flex flex-col items-center justify-center gap-1 shrink-0 shadow"
+            >
+              <Download className="w-4 h-4 shrink-0" />
+              <span className="text-xs leading-none truncate w-full text-center">
+                {t(lang, 'btnExportSmall')}
+              </span>
+            </button>
+          </nav>
+
+          {/* 3-Step First-Time Onboarding Overlay */}
+          {onboardingStep !== null && (
+            <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-sm bg-[#0F1522] border border-amber-500/50 rounded-2xl p-5 space-y-4 shadow-2xl">
+                <div className="text-xs font-mono text-amber-400">
+                  Quick Guide · Step {onboardingStep} of 3
+                </div>
+                <h3 className="text-base font-bold text-slate-100">
+                  {onboardingStep === 1
+                    ? t(lang, 'onboardStep1Title')
+                    : onboardingStep === 2
+                    ? t(lang, 'onboardStep2Title')
+                    : t(lang, 'onboardStep3Title')}
+                </h3>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  {onboardingStep === 1
+                    ? t(lang, 'onboardStep1Desc')
+                    : onboardingStep === 2
+                    ? t(lang, 'onboardStep2Desc')
+                    : t(lang, 'onboardStep3Desc')}
+                </p>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onboardingStep < 3) {
+                        setOnboardingStep(onboardingStep + 1);
+                      } else {
+                        try {
+                          localStorage.setItem('clipnova_onboarding_done_v3', 'true');
+                        } catch {
+                          // ignore
+                        }
+                        setOnboardingStep(null);
+                      }
+                    }}
+                    className="min-h-[44px] px-5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+                  >
+                    {onboardingStep < 3 ? t(lang, 'onboardNext') : t(lang, 'onboardDone')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
-      {/* FEATURE IMPLEMENTATION CHECKLIST MODAL */}
+      {/* ===================================================================== */}
+      {/* DELETE PROJECT CONFIRMATION MODAL (Section F)                         */}
+      {/* ===================================================================== */}
+      {deleteTargetProject && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#0F1522] border border-slate-800 rounded-2xl p-5 space-y-4 shadow-2xl">
+            <h2 className="text-base font-bold text-slate-100">
+              {t(lang, 'confirmDeleteTitle')}
+            </h2>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              "{deleteTargetProject.name}" — {t(lang, 'confirmDeleteSub')}
+            </p>
+            <div className="flex items-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTargetProject(null)}
+                className="flex-1 min-h-[44px] rounded-xl bg-slate-800 text-slate-200 font-semibold text-xs"
+              >
+                {t(lang, 'btnCancel')}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const targetId = deleteTargetProject.id;
+                  await deleteProjectFromStorage(targetId);
+                  setProjects((prev) => prev.filter((p) => p.id !== targetId));
+                  setDeleteTargetProject(null);
+                  triggerToast('Project deleted.', 'प्रोजेक्ट हटाया गया।');
+                }}
+                className="flex-1 min-h-[44px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs"
+              >
+                {t(lang, 'btnConfirmDelete')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* ANDROID HARDWARE BACK EXIT CONFIRMATION MODAL (Section A.6)           */}
+      {/* ===================================================================== */}
+      {showExitConfirmModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#0F1522] border border-slate-800 rounded-2xl p-5 space-y-4 shadow-2xl">
+            <h2 className="text-base font-bold text-slate-100">{t(lang, 'exitConfirmTitle')}</h2>
+            <p className="text-xs text-slate-300 leading-relaxed">{t(lang, 'exitConfirmSub')}</p>
+            <div className="flex items-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowExitConfirmModal(false)}
+                className="flex-1 min-h-[44px] rounded-xl bg-slate-800 text-slate-200 font-semibold text-xs"
+              >
+                {t(lang, 'btnStay')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExitConfirmModal(false);
+                  exitAndroidApp();
+                }}
+                className="flex-1 min-h-[44px] rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+              >
+                {t(lang, 'btnExit')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* FEATURE IMPLEMENTATION CHECKLIST MODAL                                */}
+      {/* ===================================================================== */}
       {showChecklistModal && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-[#0F1522] border border-slate-800 rounded-2xl p-6 space-y-5 shadow-2xl">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg max-h-[80dvh] overflow-y-auto bg-[#0F1522] border border-slate-800 rounded-2xl p-5 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h2 className="text-lg font-bold text-slate-100">
-                ClipNova Build Verification Checklist
+              <h2 className="text-base font-bold text-slate-100">
+                ClipNova Feature Status Checklist
               </h2>
               <button
                 type="button"
                 onClick={() => setShowChecklistModal(false)}
-                className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400"
+                aria-label="Close checklist"
+                className="min-w-[40px] min-h-[40px] rounded-lg hover:bg-slate-800 text-slate-400 flex items-center justify-center"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-
-            <div className="space-y-4 text-xs">
+            <div className="space-y-3 text-xs">
               <div>
-                <h3 className="font-bold text-emerald-400 mb-2">
-                  Fully Working in Browser ({FEATURE_IMPLEMENTATION_CHECKLIST.fullyWorking.length})
+                <h3 className="font-bold text-emerald-400 mb-1.5">
+                  Fully Working ({FEATURE_IMPLEMENTATION_CHECKLIST.fullyWorking.length})
                 </h3>
-                <ul className="space-y-1.5 text-slate-200">
+                <ul className="space-y-1 text-slate-200">
                   {FEATURE_IMPLEMENTATION_CHECKLIST.fullyWorking.map((item, i) => (
                     <li key={i}>• {item}</li>
                   ))}
                 </ul>
               </div>
-
               <div>
-                <h3 className="font-bold text-amber-400 mb-2">
-                  Partial / Best-Effort Browser Implementations (
-                  {FEATURE_IMPLEMENTATION_CHECKLIST.partialBestEffort.length})
+                <h3 className="font-bold text-amber-400 mb-1.5">
+                  Partial / Best-Effort ({FEATURE_IMPLEMENTATION_CHECKLIST.partialBestEffort.length})
                 </h3>
-                <ul className="space-y-1.5 text-slate-300">
+                <ul className="space-y-1 text-slate-300">
                   {FEATURE_IMPLEMENTATION_CHECKLIST.partialBestEffort.map((item, i) => (
-                    <li key={i}>• {item}</li>
-                  ))}
-                </ul>
-              </div>
-
-              <div>
-                <h3 className="font-bold text-rose-400 mb-2">
-                  Native Mobile / Cloud GPU Only (
-                  {FEATURE_IMPLEMENTATION_CHECKLIST.missingNativeOnly.length})
-                </h3>
-                <ul className="space-y-1.5 text-slate-400">
-                  {FEATURE_IMPLEMENTATION_CHECKLIST.missingNativeOnly.map((item, i) => (
                     <li key={i}>• {item}</li>
                   ))}
                 </ul>
@@ -3114,46 +4081,55 @@ export function App() {
         </div>
       )}
 
-      {/* EXPORT VIDEO MODAL */}
+      {/* ===================================================================== */}
+      {/* EXPORT VIDEO MODAL (Progress %, Cancel Button, .webm Warning, Share)  */}
+      {/* ===================================================================== */}
       {showExportModal && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-[#0F1522] border border-slate-800 rounded-2xl p-6 space-y-5 shadow-2xl">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0F1522] border border-slate-800 rounded-2xl p-5 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div>
-                <h2 className="text-lg font-bold text-slate-100">
+                <h2 className="text-base font-bold text-slate-100">
                   {t(lang, 'exportModalTitle')}
                 </h2>
                 <p className="text-xs text-slate-400">{t(lang, 'exportModalSub')}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowExportModal(false)}
-                className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              {!isExportingVideo && (
+                <button
+                  type="button"
+                  onClick={() => setShowExportModal(false)}
+                  aria-label="Close export modal"
+                  className="min-w-[40px] min-h-[40px] rounded-lg hover:bg-slate-800 text-slate-400 flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
 
-            <div className="space-y-4">
+            {/* Clear .webm format warning badge */}
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 flex items-start gap-2.5 text-xs text-amber-200">
+              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <span>{t(lang, 'exportWebmWarning')}</span>
+            </div>
+
+            <div className="space-y-3">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Resolution
-                </label>
-                <div className="grid grid-cols-5 gap-2">
+                <label className="block text-xs font-medium text-slate-300 mb-1">Resolution</label>
+                <div className="grid grid-cols-5 gap-1.5">
                   {(['480p', '720p', '1080p', '2K', '4K'] as const).map((res) => (
                     <button
                       key={res}
                       type="button"
+                      disabled={isExportingVideo}
                       onClick={() =>
                         updateProjectWithHistory((prev) => ({
                           ...prev,
                           resolution: res,
-                          isProUnlocked: res === '4K' || res === '2K' ? true : prev.isProUnlocked,
                         }))
                       }
-                      className={`py-2 rounded-lg border font-mono tabular-nums text-xs font-medium ${
+                      className={`min-h-[40px] rounded-lg border font-mono text-xs font-semibold ${
                         project.resolution === res
-                          ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
+                          ? 'bg-amber-500 text-slate-950 border-amber-400'
                           : 'bg-slate-900 border-slate-800 text-slate-300'
                       }`}
                     >
@@ -3164,18 +4140,17 @@ export function App() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                  Frame Rate
-                </label>
-                <div className="grid grid-cols-5 gap-2">
+                <label className="block text-xs font-medium text-slate-300 mb-1">Frame Rate</label>
+                <div className="grid grid-cols-5 gap-1.5">
                   {([24, 25, 30, 50, 60] as const).map((fps) => (
                     <button
                       key={fps}
                       type="button"
+                      disabled={isExportingVideo}
                       onClick={() => updateProjectWithHistory((prev) => ({ ...prev, fps }))}
-                      className={`py-2 rounded-lg border font-mono tabular-nums text-xs font-medium ${
+                      className={`min-h-[40px] rounded-lg border font-mono text-xs font-semibold ${
                         project.fps === fps
-                          ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
+                          ? 'bg-amber-500 text-slate-950 border-amber-400'
                           : 'bg-slate-900 border-slate-800 text-slate-300'
                       }`}
                     >
@@ -3185,37 +4160,17 @@ export function App() {
                 </div>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
-                <div className="text-xs font-semibold text-slate-200">
-                  {t(lang, 'proWatermarkToggle')}
-                </div>
-                <input
-                  type="checkbox"
-                  checked={project.isProUnlocked}
-                  onChange={(e) =>
-                    updateProjectWithHistory((prev) => ({
-                      ...prev,
-                      isProUnlocked: e.target.checked,
-                      watermarkEnabled: !e.target.checked,
-                    }))
-                  }
-                  className="w-4 h-4 accent-amber-500 cursor-pointer"
-                />
-              </div>
-
               {(isExportingVideo || exportProgress > 0) && (
                 <div className="space-y-2 pt-1">
                   <div className="flex justify-between text-xs">
-                    <span className="text-slate-300">
-                      {exportProgress === 100
-                        ? 'Video Ready!'
-                        : 'Rendering Non-Destructive Layers & Shaders...'}
+                    <span className="text-slate-200 font-medium">
+                      {exportProgress === 100 ? 'Render Complete!' : 'Rendering frames...'}
                     </span>
-                    <span className="font-mono tabular-nums text-amber-400 font-semibold">
+                    <span className="font-mono tabular-nums text-amber-400 font-bold">
                       {exportProgress}%
                     </span>
                   </div>
-                  <div className="w-full h-2 rounded-full bg-slate-900 overflow-hidden">
+                  <div className="w-full h-2.5 rounded-full bg-slate-900 overflow-hidden">
                     <div
                       style={{ width: `${exportProgress}%` }}
                       className="h-full bg-amber-500 transition-all duration-150"
@@ -3224,19 +4179,25 @@ export function App() {
                 </div>
               )}
 
-              <div className="flex flex-col gap-2.5 pt-2">
-                {!exportedVideoUrl ? (
+              <div className="flex flex-col gap-2 pt-2">
+                {isExportingVideo ? (
                   <button
                     type="button"
-                    disabled={isExportingVideo}
+                    onClick={handleCancelVideoExport}
+                    className="w-full min-h-[46px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-2"
+                  >
+                    <X className="w-4 h-4" />
+                    <span>{t(lang, 'exportCancelBtn')}</span>
+                  </button>
+                ) : !exportedVideoUrl ? (
+                  <button
+                    type="button"
                     onClick={handleStartVideoExport}
-                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs flex items-center justify-center gap-2"
+                    className="w-full min-h-[46px] rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                   >
                     <Download className="w-4 h-4" />
                     <span>
-                      {isExportingVideo
-                        ? 'Rendering...'
-                        : `${t(lang, 'startExportBtn')} (${project.resolution} ${project.fps}fps)`}
+                      {t(lang, 'startExportBtn')} ({project.resolution} · {project.fps}fps)
                     </span>
                   </button>
                 ) : (
@@ -3250,37 +4211,41 @@ export function App() {
                           fileName,
                           `ClipNova Video Export (${project.resolution})`
                         );
-                        if (res.savedPath) {
+                        if (res.saved) {
                           triggerToast(
                             isAndroidNativeApp()
-                              ? `Saved to Android device storage (${fileName})`
+                              ? `Saved to Documents/ClipNova/${fileName}`
                               : `Downloaded ${fileName}`,
                             isAndroidNativeApp()
-                              ? `फ़ोन स्टोरेज में वीडियो सेव किया गया (${fileName})`
-                              : `वीडियो डाउनलोड किया गया (${fileName})`
+                              ? `Documents/ClipNova/${fileName} में सेव किया गया`
+                              : `${fileName} डाउनलोड किया गया`
                           );
                         }
-                      } else if (exportedVideoUrl) {
-                        const a = document.createElement('a');
-                        a.href = exportedVideoUrl;
-                        a.download = fileName;
-                        a.click();
                       }
                     }}
-                    className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs flex items-center justify-center gap-2"
+                    className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                   >
                     <Check className="w-4 h-4" />
                     <span>{t(lang, 'downloadVideoBtn')}</span>
                   </button>
                 )}
 
-                <button
-                  type="button"
-                  onClick={() => downloadProjectJson(project)}
-                  className="w-full min-h-[40px] py-2 px-4 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-xs"
-                >
-                  {t(lang, 'exportJsonBtn')}
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => downloadProjectJson(project)}
+                    className="min-h-[42px] px-3 rounded-xl border border-slate-700 bg-slate-900 text-slate-200 font-medium text-xs"
+                  >
+                    Export .JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadFcpXml(project)}
+                    className="min-h-[42px] px-3 rounded-xl border border-slate-700 bg-slate-900 text-slate-200 font-medium text-xs"
+                  >
+                    Export .FCPXML
+                  </button>
+                </div>
               </div>
             </div>
           </div>

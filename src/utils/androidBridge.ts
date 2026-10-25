@@ -1,19 +1,101 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
 
+export const BUILD_ID: string =
+  (typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    (import.meta.env.VITE_BUILD_ID as string)) ||
+  'dev';
+
+interface CapacitorAppPlugin {
+  addListener?: (
+    eventName: 'backButton',
+    listenerFunc: (data: { canGoBack: boolean }) => void
+  ) => Promise<{ remove: () => void }> | { remove: () => void };
+  exitApp?: () => Promise<void>;
+}
+
+const CapApp = registerPlugin<CapacitorAppPlugin>('App');
+
 export function isAndroidNativeApp(): boolean {
-  return Capacitor.isNativePlatform();
+  try {
+    return Capacitor.isNativePlatform();
+  } catch {
+    return false;
+  }
 }
 
 export async function initAndroidNativeBridge(): Promise<void> {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!isAndroidNativeApp()) return;
   try {
     await StatusBar.setStyle({ style: Style.Dark });
-    await StatusBar.setBackgroundColor({ color: '#090D14' });
+    await StatusBar.setBackgroundColor({ color: '#070A10' });
   } catch {
     // Ignore on platforms where StatusBar plugin is unavailable
+  }
+}
+
+/**
+ * Registers a hardware back button listener for Android WebView & Capacitor.
+ * Flow: close open bottom sheet/modal -> save & exit Editor to Home -> show Exit Confirmation on Home.
+ */
+export function registerHardwareBackButton(onBack: () => void): () => void {
+  let pluginListenerHandle: { remove: () => void } | null = null;
+
+  try {
+    if (CapApp && typeof CapApp.addListener === 'function') {
+      const maybePromise = CapApp.addListener('backButton', () => {
+        onBack();
+      });
+      if (maybePromise && typeof (maybePromise as Promise<{ remove: () => void }>).then === 'function') {
+        (maybePromise as Promise<{ remove: () => void }>)
+          .then((h) => {
+            pluginListenerHandle = h;
+          })
+          .catch(() => {});
+      } else if (maybePromise) {
+        pluginListenerHandle = maybePromise as { remove: () => void };
+      }
+    }
+  } catch {
+    // Fallback to document backbutton event below
+  }
+
+  const handleDocBackButton = (e: Event) => {
+    e.preventDefault();
+    onBack();
+  };
+
+  document.addEventListener('backbutton', handleDocBackButton, false);
+
+  return () => {
+    document.removeEventListener('backbutton', handleDocBackButton, false);
+    try {
+      pluginListenerHandle?.remove();
+    } catch {
+      // ignore
+    }
+  };
+}
+
+export async function exitAndroidApp(): Promise<void> {
+  try {
+    if (CapApp && typeof CapApp.exitApp === 'function') {
+      await CapApp.exitApp();
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    const nav = navigator as unknown as { app?: { exitApp?: () => void } };
+    if (nav.app?.exitApp) {
+      nav.app.exitApp();
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -31,21 +113,21 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * Saves an exported video (.webm) or project archive (.json / .md) to the Android
- * phone's storage using Capacitor Filesystem and opens the native Android Share sheet,
- * or falls back to standard browser download when running on the web.
+ * Saves an exported video (.webm) or project archive (.json / .srt / .fcpxml / .md)
+ * to the Android phone's storage (Documents/ClipNova) using Capacitor Filesystem
+ * and opens the native Share sheet, or falls back to browser download.
  */
 export async function saveAndShareFileOnDevice(
   blob: Blob,
   fileName: string,
   title: string = 'ClipNova Export'
-): Promise<{ savedPath: string; shared: boolean }> {
-  if (Capacitor.isNativePlatform()) {
+): Promise<{ saved: boolean; savedPath: string; shared: boolean }> {
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+
+  if (isAndroidNativeApp()) {
     try {
       const base64Data = await blobToBase64(blob);
-      const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-      // Write to Documents (or Cache fallback) on Android
       let writeResult;
       try {
         writeResult = await Filesystem.writeFile({
@@ -70,9 +152,9 @@ export async function saveAndShareFileOnDevice(
           url: writeResult.uri,
           dialogTitle: title,
         });
-        return { savedPath: writeResult.uri, shared: true };
+        return { saved: true, savedPath: writeResult.uri, shared: true };
       } catch {
-        return { savedPath: writeResult.uri, shared: false };
+        return { saved: true, savedPath: writeResult.uri, shared: false };
       }
     } catch (err) {
       console.error('Native filesystem save failed, falling back to browser download:', err);
@@ -83,10 +165,10 @@ export async function saveAndShareFileOnDevice(
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = fileName;
+  a.download = safeName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  return { savedPath: fileName, shared: false };
+  return { saved: true, savedPath: safeName, shared: false };
 }

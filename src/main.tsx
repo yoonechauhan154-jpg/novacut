@@ -18,18 +18,15 @@ import '@fontsource/kalam/700.css';
 
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
+import { ErrorBoundary, GlobalRuntimeErrorBanner } from './components/ErrorBoundary.tsx';
 import './index.css';
 import { initAndroidNativeBridge } from './utils/androidBridge.ts';
-import { ErrorBoundary, installGlobalErrorHandlers } from './ErrorBoundary';
 
 initAndroidNativeBridge();
 
-// Install global error handlers so crashes show a red box instead of blank screen
-installGlobalErrorHandlers();
-
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
-    <div id="error-global-root"></div>
+    <GlobalRuntimeErrorBanner />
     <App />
   </ErrorBoundary>
 );
