@@ -279,6 +279,8 @@ export function App() {
   const [debugReadyState, setDebugReadyState] = useState<number>(0);
   const [debugPaused, setDebugPaused] = useState<boolean>(true);
   const [debugLastError, setDebugLastError] = useState<string | null>(null);
+  const [debugPlayingMediaCount, setDebugPlayingMediaCount] = useState<number>(0);
+  const [debugActiveAudioSources, setDebugActiveAudioSources] = useState<number>(0);
   const [showPlaybackDebug, setShowPlaybackDebug] = useState<boolean>(false);
   const lastFrameTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
@@ -333,6 +335,7 @@ export function App() {
   const playheadRef = useRef<number>(0);
   const renderRafRef = useRef<number | null>(null);
   const lastDisplayUpdateRef = useRef<number>(0);
+  const wasPlayingRef = useRef<boolean>(false);
   const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
 
   // Load saved projects from IndexedDB/localStorage on launch
@@ -683,16 +686,23 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         if (isPlaying && isActive) {
           if (audio.paused) {
             try {
-              audio.currentTime = Math.max(0, sourceTime);
+              // Don't re-seek if already at expected source time (tolerance 0.1 s)
+              if (Math.abs(audio.currentTime - sourceTime) > 0.1) {
+                audio.currentTime = Math.max(0, sourceTime);
+              }
               audio.play().catch(() => {});
             } catch {}
           } else if (Math.abs(audio.currentTime - sourceTime) > 0.1) {
             audio.currentTime = Math.max(0, sourceTime);
           }
-        } else if (!isActive && !audio.paused) {
-          if (!activeAudioClip) {
-            try { audio.pause(); } catch {}
-          }
+        } else {
+          // Not playing or not active: pause AND mute this element
+          try { audio.pause(); } catch {}
+          audio.muted = true;
+        }
+        // Non-active clip sharing this element: pause if no clip is active at all
+        if (!isActive && !audio.paused && !activeAudioClip) {
+          try { audio.pause(); } catch {}
         }
       }
       // Sync <video> elements with playhead. One element per source; shared after split.
@@ -749,31 +759,40 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             const seeked = Math.abs(el.currentTime - pending.targetTime) < 0.1;
             if (seeked || performance.now() > pending.deadline) {
               seekPendingRef.current = null;
-              try {
-                el.play().catch((err) => {
+              // Only play if element has enough data buffered (readyState >= 2 = HAVE_CURRENT_DATA)
+              if (el.readyState >= 2) {
+                try {
+                  el.play().catch((err) => {
+                    setIsPlaying(false);
+                    setDebugLastError(`${err.name}: ${err.message}`);
+                    triggerToast(
+                      `Playback error: ${err.name}: ${err.message}`,
+                      `प्लेबैक त्रुटि: ${err.name}: ${err.message}`
+                    );
+                  });
+                } catch (err) {
                   setIsPlaying(false);
-                  setDebugLastError(`${err.name}: ${err.message}`);
+                  const msg = err instanceof Error ? err.message : String(err);
+                  const name = err instanceof Error ? err.name : 'Unknown';
+                  setDebugLastError(`${name}: ${msg}`);
                   triggerToast(
-                    `Playback error: ${err.name}: ${err.message}`,
-                    `प्लेबैक त्रुटि: ${err.name}: ${err.message}`
+                    `Playback error: ${name}: ${msg}`,
+                    `प्लेबैक त्रुटि: ${name}: ${msg}`
                   );
-                });
-              } catch (err) {
-                setIsPlaying(false);
-                const msg = err instanceof Error ? err.message : String(err);
-                const name = err instanceof Error ? err.name : 'Unknown';
-                setDebugLastError(`${name}: ${msg}`);
-                triggerToast(
-                  `Playback error: ${name}: ${msg}`,
-                  `प्लेबैक त्रुटि: ${name}: ${msg}`
-                );
+                }
+              } else {
+                // Not enough data yet; keep seeking pending until ready
+                seekPendingRef.current = { el, targetTime: sourceTime, deadline: performance.now() + 500 };
               }
             }
             continue;
           }
           if (el.paused) {
             try {
-              el.currentTime = Math.max(0, sourceTime);
+              // Don't re-seek if already at expected source time (tolerance 0.1 s)
+              if (Math.abs(el.currentTime - sourceTime) > 0.1) {
+                el.currentTime = Math.max(0, sourceTime);
+              }
               seekPendingRef.current = { el, targetTime: sourceTime, deadline: performance.now() + 500 };
             } catch {
               // ignore
@@ -781,12 +800,31 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           } else if (Math.abs(el.currentTime - sourceTime) > 0.5) {
             el.currentTime = Math.max(0, sourceTime);
           }
-        } else if (!isActive && !el.paused) {
-          // Non-active clip sharing this element: do not pause — only the active clip controls playback
-          // If no clip is active at all (playhead between clips or at end), pause everything
-          if (!activeVideoClip) {
-            try { el.pause(); } catch {}
-          }
+        } else {
+          // Not playing or not active: pause this element (includes active clip when paused)
+          try { el.pause(); } catch {}
+        }
+        // Non-active clip sharing this element: pause if no clip is active at all
+        if (!isActive && !el.paused && !activeVideoClip) {
+          try { el.pause(); } catch {}
+        }
+      }
+
+      // Pre-load next clip element ~300 ms before boundary so play() doesn't stall on split transitions
+      const nextClip = project.clips.find(
+        (c) =>
+          c.trackType === 'video' &&
+          c.sourceType === 'uploaded-video' &&
+          ct >= c.startTime - 0.3 &&
+          ct < c.startTime
+      );
+      if (nextClip) {
+        const nextEl = mediaElementsRef.current.get(nextClip.id);
+        if (nextEl instanceof HTMLVideoElement && nextEl.readyState < 2) {
+          try {
+            nextEl.currentTime = Math.max(0, nextClip.sourceStart);
+            nextEl.load();
+          } catch {}
         }
       }
 
@@ -838,6 +876,12 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       );
       soundEngine.triggerTimelineAudioTick(playheadRef.current, project.clips, isPlaying);
 
+      // Stop all Web Audio sources when transitioning to paused (prevents echo/loop on pause)
+      if (wasPlayingRef.current && !isPlaying) {
+        soundEngine.stopAllAudio();
+      }
+      wasPlayingRef.current = isPlaying;
+
       // Debug metrics: measure preview fps and dropped frames
       frameCountRef.current++;
       const debugNow = performance.now();
@@ -846,6 +890,20 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         frameCountRef.current = 0;
         lastFrameTimeRef.current = debugNow;
       }
+
+      // Debug counters for Bug B acceptance: playing media elements + active audio sources
+      let playingMediaCount = 0;
+      for (const [, el] of mediaElementsRef.current) {
+        if (el instanceof HTMLVideoElement && !el.paused) playingMediaCount++;
+      }
+      for (const [, audio] of audioElementsRef.current) {
+        if (!audio.paused) playingMediaCount++;
+      }
+      if (!videoRef.current?.paused) playingMediaCount++;
+      setDebugPlayingMediaCount(playingMediaCount);
+      setDebugActiveAudioSources(soundEngine.activeAudioSourcesCount());
+
+      // Debug metrics: measure preview fps and dropped frames
       // Estimate dropped frames (target ~60fps, measure actual vs expected)
       const expectedFrames = Math.round((debugNow - lastFrameTimeRef.current) / 16.67);
       const actualFrames = frameCountRef.current;
@@ -861,7 +919,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           c.trackType === 'video' &&
           c.sourceType === 'uploaded-video' &&
           ct >= c.startTime &&
-          ct <= c.startTime + c.duration
+          ct < c.startTime + c.duration
       );
       if (activeVideoForDebug) {
         const el = mediaElementsRef.current.get(activeVideoForDebug.id);
@@ -2816,6 +2874,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               <div className="font-mono text-xs">Preview FPS: {debugPreviewFps}</div>
               <div className="font-mono text-xs">Dropped Frames: {debugDroppedFrames}</div>
               <div className="font-mono text-xs">Playing: {debugPlaying ? 'yes' : 'no'}</div>
+              <div className="font-mono text-xs">Playing media: {debugPlayingMediaCount}</div>
+              <div className="font-mono text-xs">Active audio sources: {debugActiveAudioSources}</div>
               {showPlaybackDebug && (
                 <div className="space-y-1 pt-1 border-t border-slate-800/50">
                   <div className="font-mono text-xs">Active clip: {debugActiveClipId ?? '—'}</div>

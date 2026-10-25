@@ -5,6 +5,8 @@ class ClipNovaSoundEngine {
   private lastBeatTriggered: number = -1;
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
+  // Track active oscillator/gain nodes so we can stop/disconnect them on pause
+  private activeNodes: Set<AudioNode> = new Set();
 
   private ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -122,6 +124,10 @@ class ClipNovaSoundEngine {
       gain.connect(destinationNode);
       osc.start(now);
       osc.stop(now + 0.13);
+      // Auto-cleanup tracked nodes after they stop
+      setTimeout(() => { this.activeNodes.delete(osc); this.activeNodes.delete(gain); }, 200);
+      this.activeNodes.add(osc);
+      this.activeNodes.add(gain);
     }
 
     // Melodic pluck / synth chord on steps 2, 5, 6
@@ -144,10 +150,10 @@ class ClipNovaSoundEngine {
         voiceChanger === 'robot-mod'
           ? 'square'
           : preset === 'wedding-shehnai'
-          ? 'sawtooth'
-          : preset === 'cyber-synth'
-          ? 'triangle'
-          : 'sine';
+            ? 'sawtooth'
+            : preset === 'cyber-synth'
+              ? 'triangle'
+              : 'sine';
       osc.frequency.setValueAtTime(noteFreq, now);
 
       gain.gain.setValueAtTime(volume * 0.45, now);
@@ -157,6 +163,9 @@ class ClipNovaSoundEngine {
       gain.connect(destinationNode);
       osc.start(now);
       osc.stop(now + 0.17);
+      setTimeout(() => { this.activeNodes.delete(osc); this.activeNodes.delete(gain); }, 250);
+      this.activeNodes.add(osc);
+      this.activeNodes.add(gain);
     }
   }
 
@@ -192,6 +201,27 @@ class ClipNovaSoundEngine {
       markers.push(t);
     }
     return markers;
+  }
+
+  /** Return the number of currently active Web Audio source nodes (oscillators/gains). */
+  public activeAudioSourcesCount(): number {
+    return this.activeNodes.size;
+  }
+
+  /** Stop and disconnect all tracked Web Audio nodes; call on pause to prevent echo/loop. */
+  public stopAllAudio(): void {
+    this.activeNodes.forEach((node) => {
+      try {
+        if (node instanceof AudioBufferSourceNode || node instanceof OscillatorNode) {
+          (node as OscillatorNode | AudioBufferSourceNode).stop?.();
+        }
+        node.disconnect();
+      } catch {}
+    });
+    this.activeNodes.clear();
+    if (this.ctx && this.ctx.state !== 'closed') {
+      this.ctx.suspend().catch(() => {});
+    }
   }
 
   public async startVoiceoverRecording(): Promise<boolean> {
