@@ -305,7 +305,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       onPointerLeave={handlePointerUp}
     >
       {/* Timeline Action Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 pb-6 bg-[#0F1522] border-b border-slate-800/80 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 pb-[var(--safe-area-bottom)] bg-[#0F1522] border-b border-slate-800/80 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap min-w-0">
           <button
             type="button"
@@ -486,7 +486,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       {/* Multi-Track Scrollable Timeline Area */}
       <div
         ref={scrollContainerRef}
-        className="relative overflow-x-auto overflow-y-auto max-h-[250px] sm:max-h-[275px]"
+        className="relative overflow-x-auto overflow-y-auto max-h-[250px] sm:max-h-[275px] pb-[var(--safe-area-bottom)]"
         onPointerDown={handleRulerPointerDown}
         onTouchStart={handleTouchStartPinch}
         onTouchMove={handleTouchMovePinch}

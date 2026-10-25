@@ -116,6 +116,13 @@ export function App() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('editor');
   const [activeTool, setActiveTool] = useState<ToolCategory>('layers');
 
+  // Accordion: only one tool-inspector section open at a time
+  const [accordionOpen, setAccordionOpen] = useState<string | null>('adjustment');
+
+  const toggleAccordion = (id: string) => {
+    setAccordionOpen((prev) => (prev === id ? null : id));
+  };
+
   // Toast Notification for Best-Effort / Demo Features & Actions
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const triggerToast = (msgEn: string, msgHi?: string) => {
@@ -670,47 +677,116 @@ export function App() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    Array.from(files).forEach((file, idx) => {
+    triggerToast(
+      lang === 'hi' ? 'फ़ाइल चुन ली गई है, मेटाडेटा पढ़ रहा है…' : 'File selected, reading metadata…'
+    );
+
+    Array.from(files).forEach(async (file, idx) => {
       const url = URL.createObjectURL(file);
       const isVideo = file.type.startsWith('video/');
       const clipId = `upload-${Date.now()}-${idx}`;
+
+      let duration = 4.5; // fallback
 
       if (isVideo) {
         const videoEl = document.createElement('video');
         videoEl.src = url;
         videoEl.muted = true;
         videoEl.playsInline = true;
+        videoEl.preload = 'metadata';
         videoEl.crossOrigin = 'anonymous';
+        videoEl.style.display = 'none';
+        document.body.appendChild(videoEl);
+
+        videoEl.onloadedmetadata = () => {
+          duration = videoEl.duration || 4.5;
+          const existingMain = project.clips.filter((c) => c.trackType === 'video');
+          const startAt = existingMain.reduce(
+            (max, c) => Math.max(max, c.startTime + c.duration),
+            0
+          );
+
+          const newClip = createBaseClip({
+            id: clipId,
+            trackId: 'track-video-main',
+            trackType: 'video',
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            startTime: Number(startAt.toFixed(2)),
+            duration: Number(duration.toFixed(2)),
+            sourceType: 'uploaded-video',
+            mediaUrl: url,
+          });
+
+          updateProjectWithHistory((prev) => ({
+            ...prev,
+            clips: [...prev.clips, newClip],
+          }));
+          setSelectedClipId(clipId);
+
+          triggerToast(
+            `Video imported: "${file.name}" (${duration.toFixed(2)}s) — added to Main Video track.`,
+            `वीडियो इम्पोर्ट हो गया: "${file.name}" — मेन वीडियो ट्रैक पर जोड़ा गया।`
+          );
+
+          // Clean up the temporary video element
+          URL.revokeObjectURL(url);
+          document.body.removeChild(videoEl);
+        };
+
+        videoEl.onerror = () => {
+          triggerToast(
+            `Failed to load video: ${file.name}`,
+            `वीडियो लोड करने में विफल: ${file.name}`
+          );
+          URL.revokeObjectURL(url);
+          document.body.removeChild(videoEl);
+        };
+
         videoEl.load();
-        mediaElementsRef.current.set(clipId, videoEl);
       } else {
         const imgEl = new Image();
         imgEl.src = url;
-        mediaElementsRef.current.set(clipId, imgEl);
+        imgEl.onload = () => {
+          mediaElementsRef.current.set(clipId, imgEl);
+
+          const existingMain = project.clips.filter((c) => c.trackType === 'video');
+          const startAt = existingMain.reduce(
+            (max, c) => Math.max(max, c.startTime + c.duration),
+            0
+          );
+
+          const newClip = createBaseClip({
+            id: clipId,
+            trackId: 'track-video-main',
+            trackType: 'video',
+            title: file.name.replace(/\.[^/.]+$/, ''),
+            startTime: Number(startAt.toFixed(2)),
+            duration: Number(duration.toFixed(2)),
+            sourceType: 'uploaded-image',
+            mediaUrl: url,
+          });
+
+          updateProjectWithHistory((prev) => ({
+            ...prev,
+            clips: [...prev.clips, newClip],
+          }));
+          setSelectedClipId(clipId);
+
+          triggerToast(
+            `Image imported: "${file.name}" — added to Main Video track.`,
+            `इमेज इम्पोर्ट हो गई: "${file.name}" — मेन वीडियो ट्रैक पर जोड़ा गया।`
+          );
+
+          URL.revokeObjectURL(url);
+        };
+        imgEl.onerror = () => {
+          triggerToast(
+            `Failed to load image: ${file.name}`,
+            `इमेज लोड करने में विफल: ${file.name}`
+          );
+          URL.revokeObjectURL(url);
+        };
       }
-
-      const existingMain = project.clips.filter((c) => c.trackType === 'video');
-      const startAt = existingMain.reduce(
-        (max, c) => Math.max(max, c.startTime + c.duration),
-        0
-      );
-
-      const newClip = createBaseClip({
-        id: clipId,
-        trackId: 'track-video-main',
-        trackType: 'video',
-        title: file.name.replace(/\.[^/.]+$/, ''),
-        startTime: Number(startAt.toFixed(2)),
-        duration: 4.5,
-        sourceType: isVideo ? 'uploaded-video' : 'uploaded-image',
-        mediaUrl: url,
-      });
-
-      updateProjectWithHistory((prev) => ({
-        ...prev,
-        clips: [...prev.clips, newClip],
-      }));
-      setSelectedClipId(clipId);
     });
 
     e.target.value = '';
@@ -1515,62 +1591,98 @@ export function App() {
                 {/* ========================================================= */}
                 {activeTool === 'layers' && (
                   <div className="space-y-4">
+                    {/* Section: Create Layers */}
                     <div className="space-y-1">
-                      <div className="text-[11px] font-semibold text-cyan-400">
-                        {t(lang, 'nonDestructiveBadge')}
-                      </div>
-                      <h2 className="text-sm font-bold text-slate-100">
-                        {lang === 'hi'
-                          ? 'एडजस्टमेंट लेयर और इफेक्ट ओवरले लेयर'
-                          : 'Adjustment Layers & Effect Overlay Layers'}
-                      </h2>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                       <button
                         type="button"
-                        onClick={handleCreateAdjustmentLayer}
-                        className="min-h-[42px] px-3 py-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-1.5"
+                        onClick={() => toggleAccordion('create-layers')}
+                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
                       >
-                        <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>{t(lang, 'createAdjustmentLayer')}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleCreateEffectLayer('light-leak', playheadTime)}
-                        className="min-h-[42px] px-3 py-2 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/50 text-fuchsia-200 font-semibold text-xs flex items-center justify-center gap-1.5"
-                      >
-                        <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
-                        <span>{t(lang, 'createEffectOverlayLayer')}</span>
-                      </button>
-                    </div>
-
-                    {/* Active Layer or Clip Inspector */}
-                    {selectedClip ? (
-                      <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4">
-                        <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-                          <div>
-                            <div className="text-xs font-bold text-amber-400">
-                              {selectedClip.trackType === 'adjustment'
-                                ? '◐ Adjustment Layer Active'
-                                : selectedClip.trackType === 'effect-layer'
-                                ? '✦ Effect Overlay Layer Active'
-                                : `Selected Clip: ${selectedClip.trackType.toUpperCase()}`}
-                            </div>
-                            <div className="text-xs text-slate-200 truncate">
-                              {selectedClip.title} ({selectedClip.startTime}s –{' '}
-                              {(selectedClip.startTime + selectedClip.duration).toFixed(1)}s)
-                            </div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-[11px] font-semibold text-cyan-400">
+                            {t(lang, 'nonDestructiveBadge')}
                           </div>
-                          <button
-                            type="button"
-                            onClick={handleAddKeyframeAtPlayhead}
-                            className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-semibold"
-                          >
-                            {t(lang, 'btnAddKeyframe')}
-                          </button>
+                          <h2 className="text-sm font-bold text-slate-100">
+                            {lang === 'hi'
+                              ? 'एडजस्टमेंट लेयर और इफेक्ट ओवरले लेयर'
+                              : 'Adjustment Layers & Effect Overlay Layers'}
+                          </h2>
                         </div>
+                        {accordionOpen === 'create-layers' ? (
+                          <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+                        )}
+                      </button>
+                      {accordionOpen === 'create-layers' && (
+                        <div className="mt-3 space-y-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <button
+                              type="button"
+                              onClick={handleCreateAdjustmentLayer}
+                              className="min-h-[42px] px-3 py-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/50 text-cyan-200 font-semibold text-xs flex items-center justify-center gap-1.5"
+                            >
+                              <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                              <span>{t(lang, 'createAdjustmentLayer')}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleCreateEffectLayer('light-leak', playheadTime)}
+                              className="min-h-[42px] px-3 py-2 rounded-lg bg-fuchsia-500/20 hover:bg-fuchsia-500/30 border border-fuchsia-500/50 text-fuchsia-200 font-semibold text-xs flex items-center justify-center gap-1.5"
+                            >
+                              <Sparkles className="w-3.5 h-3.5 text-fuchsia-400" />
+                              <span>{t(lang, 'createEffectOverlayLayer')}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Section: Active Layer or Clip Inspector */}
+                    <div className="space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleAccordion('clip-inspector')}
+                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-slate-300">
+                            {selectedClip ? `Selected: ${selectedClip.title}` : 'No clip selected'}
+                          </span>
+                          {accordionOpen === 'clip-inspector' ? (
+                            <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+                          )}
+                        </div>
+                      </button>
+                      {accordionOpen === 'clip-inspector' && (
+                        <div className="mt-3 space-y-2">
+                          {selectedClip ? (
+                            <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4">
+                              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                                <div>
+                                  <div className="text-xs font-bold text-amber-400">
+                                    {selectedClip.trackType === 'adjustment'
+                                      ? '◐ Adjustment Layer Active'
+                                      : selectedClip.trackType === 'effect-layer'
+                                      ? '✦ Effect Overlay Layer Active'
+                                      : `Selected Clip: ${selectedClip.trackType.toUpperCase()}`}
+                                  </div>
+                                  <div className="text-xs text-slate-200 truncate">
+                                    {selectedClip.title} ({selectedClip.startTime}s –{' '}
+                                    {(selectedClip.startTime + selectedClip.duration).toFixed(1)}s)
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={handleAddKeyframeAtPlayhead}
+                                  className="px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-semibold"
+                                >
+                                  {t(lang, 'btnAddKeyframe')}
+                                </button>
+                              </div>
 
                         {/* Blend Mode & Opacity (Works on Adjustment Layers, Effect Layers & Clips) */}
                         <div className="grid grid-cols-2 gap-3">
@@ -1740,21 +1852,37 @@ export function App() {
                     )}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
 
                 {/* ========================================================= */}
                 {/* TAB 2: TRENDING EFFECTS & TRANSITIONS LIBRARY             */}
                 {/* ========================================================= */}
                 {activeTool === 'effects' && (
                   <div className="space-y-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-sm font-bold text-slate-100">
-                          {lang === 'hi'
-                            ? 'ट्रेंडिंग इफेक्ट्स और ट्रांज़िशन लाइब्रेरी'
-                            : 'Effects & Transitions Library'}
-                        </h2>
-                        <p className="text-[11px] text-slate-400">{t(lang, 'dragHint')}</p>
-                      </div>
+                    {/* Section: Effects & Transitions */}
+                    <div className="space-y-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleAccordion('effects-library')}
+                        className="flex items-center justify-between w-full py-2 px-3 rounded-lg bg-slate-900/80 border border-slate-800 hover:bg-slate-800 text-left transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-sm font-bold text-slate-100">
+                            {lang === 'hi'
+                              ? 'ट्रेंडिंग इफेक्ट्स और ट्रांज़िशन लाइब्रेरी'
+                              : 'Effects & Transitions Library'}
+                          </h2>
+                          <p className="text-[11px] text-slate-400">{t(lang, 'dragHint')}</p>
+                        </div>
+                        {accordionOpen === 'effects-library' ? (
+                          <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+                        )}
+                      </button>
+                      {accordionOpen === 'effects-library' && (
                       <button
                         type="button"
                         onClick={() => setShowTrendFindings((s) => !s)}
@@ -1762,6 +1890,7 @@ export function App() {
                       >
                         {showTrendFindings ? 'Hide Research' : 'Search Trends'}
                       </button>
+                      )}
                     </div>
 
                     {/* Google Search Findings Summary Box */}
@@ -2012,6 +2141,63 @@ export function App() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Imported Media - user's own gallery imports */}
+                    {project.clips
+                      .filter((c) => c.sourceType === 'uploaded-video' || c.sourceType === 'uploaded-image')
+                      .length > 0 && (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
+                            {lang === 'hi' ? 'इम्पोर्ट किया गया मीडिया' : 'Imported Media'}
+                          </h3>
+                          <p className="text-[10px] text-slate-500">
+                            {lang === 'hi' ? 'गैलरी से इम्पोर्ट की गई वीडियो और फ़ोटो' : 'Videos and photos imported from your gallery'}
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2.5">
+                          {project.clips
+                            .filter((c) => c.sourceType === 'uploaded-video' || c.sourceType === 'uploaded-image')
+                            .map((item) => (
+                              <div
+                                key={item.id}
+                                className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center justify-between gap-3"
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-xs font-semibold text-slate-100 truncate">
+                                    {item.title}
+                                  </div>
+                                  <div className="text-[11px] text-slate-400 truncate font-mono tabular-nums">
+                                    {item.sourceType} · {item.duration}s
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedClipId(item.id);
+                                      setActiveTool('layers');
+                                    }}
+                                    className="min-h-[34px] px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-100 flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <Play className="w-3 h-3 text-amber-400" />{' '}
+                                    <span>{lang === 'hi' ? 'प्ले करें' : 'Play'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleAddStarterClipFromId(item.id, 'video')}
+                                    className="min-h-[34px] px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-medium flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                    <span>+ Main</span>
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
                   </div>
                 )}
 
