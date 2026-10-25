@@ -35,6 +35,7 @@ interface TimelinePanelProps {
   scrollToTimeTrigger?: { time: number; seq: number } | null;
   onSelectClip: (id: string | null) => void;
   onSeek: (time: number) => void;
+  onPlayheadDrag?: (time: number) => void;
   onZoomChange: (px: number) => void;
   onToggleMagneticSnap: () => void;
   onUndo: () => void;
@@ -66,6 +67,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   scrollToTimeTrigger,
   onSelectClip,
   onSeek,
+  onPlayheadDrag,
   onZoomChange,
   onToggleMagneticSnap,
   onUndo,
@@ -90,6 +92,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     initialX: number;
     initialStart: number;
     initialDuration: number;
+  } | null>(null);
+
+  // Playhead scrub state
+  const [scrubState, setScrubState] = useState<{
+    initialX: number;
+    initialTime: number;
   } | null>(null);
 
   const selectedClip = clips.find((c) => c.id === selectedClipId) || null;
@@ -266,6 +274,44 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     if (dragState) {
       setDragState(null);
     }
+    if (scrubState) {
+      setScrubState(null);
+    }
+  };
+
+  const startPlayheadScrub = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    if (!scrollContainerRef.current) return;
+    const rect = scrollContainerRef.current.getBoundingClientRect();
+    const scrollLeft = scrollContainerRef.current.scrollLeft;
+    const clickX = e.clientX - rect.left + scrollLeft - TRACK_HEADER_WIDTH;
+    const targetSec = Math.max(0, Math.min(timelineDuration, clickX / zoomPxPerSec));
+    setScrubState({ initialX: e.clientX, initialTime: targetSec });
+    if (onPlayheadDrag) onPlayheadDrag(targetSec);
+  };
+
+  const handlePlayheadPointerMove = (e: React.PointerEvent) => {
+    if (!scrubState) return;
+    if (!scrollContainerRef.current) return;
+    const rect = scrollContainerRef.current.getBoundingClientRect();
+    const scrollLeft = scrollContainerRef.current.scrollLeft;
+    const clickX = e.clientX - rect.left + scrollLeft - TRACK_HEADER_WIDTH;
+    let targetSec = Math.max(0, Math.min(timelineDuration, clickX / zoomPxPerSec));
+    // Auto-scroll near left/right edges while dragging
+    const edgeZone = 60;
+    const containerWidth = rect.width;
+    const relX = e.clientX - rect.left;
+    if (relX < edgeZone) {
+      scrollContainerRef.current.scrollLeft -= 12;
+    } else if (relX > containerWidth - edgeZone) {
+      scrollContainerRef.current.scrollLeft += 12;
+    }
+    if (onPlayheadDrag) onPlayheadDrag(targetSec);
   };
 
   const handleTrackDrop = (e: React.DragEvent<HTMLDivElement>, trackType: TrackType) => {
@@ -304,7 +350,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   return (
     <section
       className="flex flex-col bg-[#0B0F17] border-t border-slate-800/90 select-none shrink-0 min-w-0 w-full"
-      onPointerMove={handlePointerMove}
+      onPointerMove={(e) => { handlePointerMove(e); handlePlayheadPointerMove(e); }}
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
     >
@@ -496,7 +542,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 {Math.round(zoomPxPerSec)}px/s
               </span>
             </div>
-            <div className="relative flex-1">
+            <div className="relative flex-1" style={{ touchAction: 'none' }} onPointerDown={handleRulerPointerDown}>
               {Array.from({ length: timelineDuration + 1 }).map((_, sec) => (
                 <div
                   key={sec}
@@ -653,12 +699,19 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             );
           })}
 
-          {/* Vertical Playhead Line */}
+          {/* Vertical Playhead Line — draggable with 44px touch area */}
           <div
-            style={{ left: `${TRACK_HEADER_WIDTH + playheadTime * zoomPxPerSec}px` }}
-            className="pointer-events-none absolute top-0 bottom-0 z-30 w-0.5 bg-amber-400"
+            style={{
+              left: `${TRACK_HEADER_WIDTH + playheadTime * zoomPxPerSec - 22}px`,
+              touchAction: 'none',
+            }}
+            className="absolute top-0 bottom-0 z-30 w-[44px]"
+            onPointerDown={startPlayheadScrub}
           >
-            <div className="w-3 h-3 -ml-[5px] bg-amber-400 rotate-45 rounded-[2px] shadow" />
+            <div className="absolute left-1/2 -ml-[1px] top-0 bottom-0 w-[2px] bg-amber-400" />
+            <div className="absolute left-1/2 -ml-[6px] -top-2 h-4 w-4 flex items-center justify-center">
+              <div className="w-3 h-3 bg-amber-400 rotate-45 rounded-[2px] shadow" />
+            </div>
           </div>
         </div>
       </div>

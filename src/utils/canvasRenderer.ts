@@ -836,11 +836,11 @@ export function renderProjectFrame(
         if (el) {
           if (el instanceof HTMLVideoElement) {
             // Only seek when NOT playing — during playback let the video element
-            // advance naturally (requestVideoFrameCallback would drive this).
-            // Seeking every frame while playing is the #1 cause of stutter on 1080p+ clips.
+            // advance naturally. Seeking every frame while playing is the #1 cause of stutter on 1080p+ clips.
+            // Source time = sourceStart + (timelineTime - startTime) * speed.
             if (!isPlaying) {
-              const targetTime =
-                (clip.inPoint + effectiveOffset) % Math.max(0.5, el.duration || clip.duration);
+              const relTime = playheadTime - clip.startTime;
+              const targetTime = (clip.sourceStart + relTime * clip.speed) % Math.max(0.5, el.duration || clip.duration);
               if (Math.abs(el.currentTime - targetTime) > 0.28) {
                 el.currentTime = targetTime;
               }

@@ -138,10 +138,13 @@ export interface TimelineClip {
   title: string;
   titleHi?: string;
   // Timing on timeline (seconds)
-  startTime: number;
+  startTime: number; // == timelineStart: where this clip starts on the timeline
   duration: number;
-  inPoint: number;
-  outPoint: number;
+  inPoint: number; // legacy source in-point (kept for backward compat)
+  outPoint: number; // legacy source out-point (kept for backward compat)
+  // Source range inside the source file (seconds). sourceStart + (timelineTime - startTime) * speed = source time.
+  sourceStart: number; // in-point inside the source file
+  sourceEnd: number; // out-point inside the source file
   // Media source
   sourceType:
     | 'procedural-scene'

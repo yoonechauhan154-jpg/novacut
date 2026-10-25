@@ -34,6 +34,8 @@ export function createBaseClip(
   return {
     inPoint: 0,
     outPoint: partial.duration,
+    sourceStart: 0,
+    sourceEnd: partial.duration,
     speed: 1,
     speedCurve: 'normal',
     smoothSlowMo: false,

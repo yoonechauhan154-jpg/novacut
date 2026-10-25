@@ -266,6 +266,8 @@ export function App() {
   const [zoomPxPerSec, setZoomPxPerSec] = useState<number>(64);
   const [magneticSnap, setMagneticSnap] = useState<boolean>(true);
   const [scrollToTimeTrigger, setScrollToTimeTrigger] = useState<{ time: number; seq: number } | null>(null);
+  const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
+  const scrubRafRef = useRef<number | null>(null);
 
   // Debug metrics for preview playback (shown in Settings)
   const [debugVideoDims, setDebugVideoDims] = useState<string>('- x -');
@@ -301,6 +303,7 @@ export function App() {
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
+  const [exportFormat, setExportFormat] = useState<'mp4' | 'webm'>('mp4');
 
   // Refs for Canvas, Media Elements, Active Export Cancellation & RAF Slider Throttling
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -625,23 +628,31 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
       // Sync <audio> and <video> elements with playhead (one audio source per clip, no echo)
       const ct = playheadRef.current;
+      // Sync <audio> elements with playhead (one audio source per clip, no echo).
+      // When two clips share the same audio element (e.g. after a split), only the
+      // clip whose timeline range contains the playhead controls playback of that element.
+      const handledAudio = new Set<HTMLAudioElement>();
       for (const [clipId, audio] of audioElementsRef.current) {
+        if (handledAudio.has(audio)) continue;
         const clip = project.clips.find((c) => c.id === clipId);
         if (!clip) continue;
+        handledAudio.add(audio);
         const clipStart = clip.startTime;
         const clipEnd = clipStart + clip.duration;
         const relTime = ct - clipStart;
+        // source time = sourceStart + (timelineTime - startTime) * speed
+        const sourceTime = clip.sourceStart + relTime * clip.speed;
         // Update mute/volume in case user changed them mid-session
         audio.muted = clip.muted;
         audio.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
         if (isPlaying && ct >= clipStart && ct <= clipEnd) {
           if (audio.paused) {
             try {
-              audio.currentTime = Math.max(0, relTime);
+              audio.currentTime = Math.max(0, sourceTime);
               audio.play().catch(() => {});
             } catch {}
-          } else if (Math.abs(audio.currentTime - relTime) > 0.1) {
-            audio.currentTime = Math.max(0, relTime);
+          } else if (Math.abs(audio.currentTime - sourceTime) > 0.1) {
+            audio.currentTime = Math.max(0, sourceTime);
           }
         } else if (!audio.paused) {
           try { audio.pause(); } catch {}
@@ -653,14 +664,18 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         const clipStart = clip.startTime;
         const clipEnd = clipStart + clip.duration;
         const relTime = ct - clipStart;
+        // source time = sourceStart + (timelineTime - startTime) * speed
+        const sourceTime = clip.sourceStart + relTime * clip.speed;
         el.muted = clip.muted;
         el.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
         if (isPlaying && ct >= clipStart && ct <= clipEnd) {
           if (el.paused) {
             try {
-              el.currentTime = Math.max(0, relTime);
+              el.currentTime = Math.max(0, sourceTime);
               el.play().catch(() => {});
             } catch {}
+          } else if (Math.abs(el.currentTime - sourceTime) > 0.5) {
+            el.currentTime = Math.max(0, sourceTime);
           }
         } else if (!el.paused) {
           try { el.pause(); } catch {}
@@ -683,12 +698,19 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             vid.src = activeVideo.mediaUrl;
           }
           const relTime = ct - activeVideo.startTime;
+          // source time = sourceStart + (timelineTime - startTime) * speed
+          const sourceTime = activeVideo.sourceStart + relTime * (activeVideo.speed || 1);
           if (!vid.paused && !isPlaying) vid.pause();
-          if (vid.paused && isPlaying) {
-            vid.currentTime = Math.max(0, relTime);
-            vid.play().catch(() => {});
-          } else if (!vid.paused && isPlaying && Math.abs(vid.currentTime - relTime) > 0.5) {
-            vid.currentTime = Math.max(0, relTime);
+          if (isPlaying) {
+            if (vid.paused) {
+              vid.currentTime = Math.max(0, sourceTime);
+              vid.play().catch(() => {});
+            } else if (Math.abs(vid.currentTime - sourceTime) > 0.5) {
+              vid.currentTime = Math.max(0, sourceTime);
+            }
+          } else if (!isPlaying && Math.abs(vid.currentTime - sourceTime) > 0.5) {
+            // Scrubbing or paused — seek to show the frame at the playhead.
+            vid.currentTime = Math.max(0, sourceTime);
           }
           vid.muted = activeVideo.muted;
           vid.volume = Math.max(0, Math.min(1, (activeVideo.volume || 100) / 100));
@@ -1113,17 +1135,47 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   const handleUpdateClipTiming = (clipId: string, newStartTime: number, newDuration: number) => {
     setProject((prev) => ({
       ...prev,
-      clips: prev.clips.map((c) =>
-        c.id === clipId
-          ? { ...c, startTime: newStartTime, duration: newDuration, outPoint: newDuration }
-          : c
-      ),
+      clips: prev.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const speed = c.speed || 1;
+        const deltaStart = newStartTime - c.startTime;
+        // source time = sourceStart + (timelineTime - startTime) * speed
+        // When startTime moves (trim-left), sourceStart moves by deltaStart * speed.
+        // When duration changes (trim-right), sourceEnd = sourceStart + duration * speed.
+        const newSourceStart = Number((c.sourceStart + deltaStart * speed).toFixed(2));
+        const newSourceEnd = Number((newSourceStart + newDuration * speed).toFixed(2));
+        return {
+          ...c,
+          startTime: newStartTime,
+          duration: newDuration,
+          sourceStart: newSourceStart,
+          sourceEnd: newSourceEnd,
+          outPoint: newDuration,
+        };
+      }),
     }));
+  };
+
+  const handlePlayheadDrag = (t: number) => {
+    // Pause playback while scrubbing, show the frame at the playhead.
+    // Seeking is throttled by the single RAF loop (~15fps UI updates); the loop
+    // seeks media elements to sourceStart + (t - startTime) * speed on each frame.
+    setIsPlaying(false);
+    setIsScrubbing(true);
+    playheadRef.current = t;
+    setPlayheadTime(t);
+    // End scrub after the next RAF tick so the frame renders before releasing.
+    if (scrubRafRef.current) cancelAnimationFrame(scrubRafRef.current);
+    scrubRafRef.current = requestAnimationFrame(() => {
+      setIsScrubbing(false);
+      scrubRafRef.current = null;
+    });
   };
 
   const handleSplitAtPlayhead = () => {
     if (!selectedClip) return;
-    const offset = playheadTime - selectedClip.startTime;
+    const t = playheadTime;
+    const offset = t - selectedClip.startTime;
     if (offset <= 0.25 || offset >= selectedClip.duration - 0.25) {
       triggerToast(
         'Move playhead inside the selected clip to split.',
@@ -1132,13 +1184,19 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       return;
     }
 
+    const speed = selectedClip.speed || 1;
     const firstHalfDur = Number(offset.toFixed(2));
     const secondHalfDur = Number((selectedClip.duration - firstHalfDur).toFixed(2));
     const secondId = `${selectedClip.id}-split-${Date.now()}`;
 
+    // Source range math: source time = sourceStart + (timelineTime - startTime) * speed
+    const leftSourceEnd = Number((selectedClip.sourceStart + firstHalfDur * speed).toFixed(2));
+
     const firstClip: TimelineClip = {
       ...selectedClip,
       duration: firstHalfDur,
+      // Left clip keeps timelineStart (= startTime) and sourceStart
+      sourceEnd: leftSourceEnd,
       outPoint: selectedClip.inPoint + firstHalfDur,
     };
 
@@ -1146,21 +1204,36 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       ...selectedClip,
       id: secondId,
       title: `${selectedClip.title} (2)`,
+      // Right clip starts at the split point on the timeline
       startTime: Number((selectedClip.startTime + firstHalfDur).toFixed(2)),
       duration: secondHalfDur,
+      // Right clip continues the source range where the left clip left off
+      sourceStart: leftSourceEnd,
+      sourceEnd: selectedClip.sourceEnd,
       inPoint: selectedClip.inPoint + firstHalfDur,
+      outPoint: selectedClip.outPoint,
     };
 
+    // Both clips reference the SAME media element — do not re-import, do not revoke the blob URL.
     if (mediaElementsRef.current.has(selectedClip.id)) {
       const existingEl = mediaElementsRef.current.get(selectedClip.id)!;
       mediaElementsRef.current.set(secondId, existingEl);
     }
+    if (audioElementsRef.current.has(selectedClip.id)) {
+      const existingAudio = audioElementsRef.current.get(selectedClip.id)!;
+      audioElementsRef.current.set(secondId, existingAudio);
+    }
 
     updateProjectWithHistory((prev) => ({
       ...prev,
-      clips: prev.clips.flatMap((c) => (c.id === selectedClip.id ? [firstClip, secondClip] : [c])),
+      clips: prev.clips.flatMap((c) => (c.id === selectedClip.id ? [firstClip, secondClip] : c)),
     }));
+    // Keep playhead where it is, select the right clip, do not pause or hang the preview.
     setSelectedClipId(secondId);
+    triggerToast(
+      'Clip split. Right part selected.',
+      'क्लिप काट दिया गया। दाहिना भाग चुना गया।'
+    );
   };
 
   const handleDuplicateSelected = () => {
@@ -1172,8 +1245,12 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       title: `${selectedClip.title} (Copy)`,
       startTime: Number((selectedClip.startTime + selectedClip.duration).toFixed(2)),
     };
+    // Share the same media/audio element — same source, do not re-import.
     if (mediaElementsRef.current.has(selectedClip.id)) {
       mediaElementsRef.current.set(dupId, mediaElementsRef.current.get(selectedClip.id)!);
+    }
+    if (audioElementsRef.current.has(selectedClip.id)) {
+      audioElementsRef.current.set(dupId, audioElementsRef.current.get(selectedClip.id)!);
     }
     updateProjectWithHistory((prev) => ({
       ...prev,
@@ -1626,11 +1703,33 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       });
       audioElementsRef.current.forEach((el) => addAudioTracks(el));
 
-      const mimeType =
-        typeof MediaRecorder !== 'undefined' &&
-        MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-          ? 'video/webm;codecs=vp9'
-          : 'video/webm';
+      // Pick MP4 (H.264 + AAC) if the WebView supports it, otherwise fall back to WebM.
+      // Order per user request: try MP4 first, then WebM.
+      let mimeType = 'video/webm';
+      let useMp4 = false;
+      if (exportFormat === 'mp4' && typeof MediaRecorder !== 'undefined') {
+        const mp4Candidates = [
+          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+          'video/mp4;codecs=avc1.42E01E',
+          'video/mp4',
+        ];
+        for (const cand of mp4Candidates) {
+          try {
+            if (MediaRecorder.isTypeSupported(cand)) {
+              mimeType = cand;
+              useMp4 = true;
+              break;
+            }
+          } catch {
+            // continue to next candidate
+          }
+        }
+      }
+      if (!useMp4) {
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+          mimeType = 'video/webm;codecs=vp9';
+        }
+      }
       const recorder = new MediaRecorder(combinedStream, { mimeType });
       exportRecorderRef.current = recorder;
       const chunks: Blob[] = [];
@@ -1646,15 +1745,20 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           triggerToast('Export cancelled.', 'एक्सपोर्ट रद्द किया गया।');
           return;
         }
-        const blob = new Blob(chunks, { type: 'video/webm' });
+        const ext = useMp4 ? 'mp4' : 'webm';
+        const blob = new Blob(chunks, { type: useMp4 ? 'video/mp4' : 'video/webm' });
         const url = URL.createObjectURL(blob);
         setExportedVideoBlob(blob);
         setExportedVideoUrl(url);
         setIsExportingVideo(false);
         setExportProgress(100);
         triggerToast(
-          'Video rendered (.webm)! Tap Save & Share below.',
-          'वीडियो तैयार (.webm)! नीचे सेव और शेयर बटन दबाएं।'
+          useMp4
+            ? 'Video rendered (.mp4)! Tap Save & Share below.'
+            : 'Video rendered (.webm)! Tap Save & Share below.',
+          useMp4
+            ? 'वीडियो तैयार (.mp4)! नीचे सेव और शेयर बटन दबाएं।'
+            : 'वीडियो तैयार (.webm)! नीचे सेव और शेयर बटन दबाएं।'
         );
       };
 
@@ -2837,6 +2941,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             onToggleFreezeSelected={handleToggleFreezeSelected}
             onAddKeyframeAtPlayhead={handleAddKeyframeAtPlayhead}
             onUpdateClipTiming={handleUpdateClipTiming}
+            onPlayheadDrag={handlePlayheadDrag}
             onToggleTrackMute={handleToggleTrackMute}
           />
 
@@ -4375,10 +4480,48 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               )}
             </div>
 
-            {/* Clear .webm format warning badge */}
-            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 flex items-start gap-2.5 text-xs text-amber-200">
-              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <span>{t(lang, 'exportWebmWarning')}</span>
+            {/* Export Format Selector: MP4 (recommended) or WebM */}
+            <div className="p-3 rounded-xl bg-[#0E131F] border border-slate-800 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-slate-300 shrink-0">Format:</span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    disabled={isExportingVideo}
+                    onClick={() => setExportFormat('mp4')}
+                    aria-pressed={exportFormat === 'mp4'}
+                    className={`min-w-[52px] min-h-[36px] rounded-lg border text-xs font-semibold flex items-center justify-center ${
+                      exportFormat === 'mp4'
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    MP4
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isExportingVideo}
+                    onClick={() => setExportFormat('webm')}
+                    aria-pressed={exportFormat === 'webm'}
+                    className={`min-w-[52px] min-h-[36px] rounded-lg border text-xs font-semibold flex items-center justify-center ${
+                      exportFormat === 'webm'
+                        ? 'bg-amber-500 text-slate-950 border-amber-400'
+                        : 'bg-slate-900 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    WebM
+                  </button>
+                </div>
+                <span className={`text-[10px] ${exportFormat === 'mp4' ? 'text-emerald-400' : 'text-amber-400'} font-medium shrink-0`}>
+                  {exportFormat === 'mp4' ? 'H.264 + AAC' : 'VP9'}
+                </span>
+              </div>
+              {exportFormat === 'webm' && (
+                <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/40 flex items-start gap-2.5 text-xs text-amber-200">
+                  <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <span>WebM fallback — MP4 not supported by this WebView.</span>
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">
@@ -4473,7 +4616,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                   <button
                     type="button"
                     onClick={async () => {
-                      const fileName = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.webm`;
+                      const ext = exportedVideoBlob?.type === 'video/mp4' ? 'mp4' : 'webm';
+                      const fileName = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
                       if (exportedVideoBlob) {
                         const res = await saveAndShareFileOnDevice(
                           exportedVideoBlob,
