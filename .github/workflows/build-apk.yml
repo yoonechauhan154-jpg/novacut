@@ -28,7 +28,7 @@ jobs:
           java-version: '17'
 
       - name: Install Dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Build Offline Web Bundle
         run: npm run build
