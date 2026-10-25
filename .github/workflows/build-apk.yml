@@ -21,11 +21,11 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Set up Java JDK 17 (Required for Android Gradle Plugin)
+      - name: Set up Java JDK 21 (Required for Android Gradle Plugin)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
