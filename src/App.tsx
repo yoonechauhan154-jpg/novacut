@@ -274,9 +274,21 @@ export function App() {
   const [debugPreviewFps, setDebugPreviewFps] = useState<number>(0);
   const [debugDroppedFrames, setDebugDroppedFrames] = useState<number>(0);
   const [debugPlaying, setDebugPlaying] = useState<boolean>(false);
+  const [debugActiveClipId, setDebugActiveClipId] = useState<string | null>(null);
+  const [debugSourceTime, setDebugSourceTime] = useState<number>(0);
+  const [debugReadyState, setDebugReadyState] = useState<number>(0);
+  const [debugPaused, setDebugPaused] = useState<boolean>(true);
+  const [debugLastError, setDebugLastError] = useState<string | null>(null);
+  const [showPlaybackDebug, setShowPlaybackDebug] = useState<boolean>(false);
   const lastFrameTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
   const droppedFramesRef = useRef<number>(0);
+  // Seek tracking: wait for seeked (500 ms timeout) before calling play()
+  const seekPendingRef = useRef<{
+    el: HTMLVideoElement;
+    targetTime: number;
+    deadline: number;
+  } | null>(null);
 
   // Effects Library Filter State
   const [effectSearch, setEffectSearch] = useState<string>('');
@@ -630,22 +642,45 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       const ct = playheadRef.current;
       // Sync <audio> elements with playhead (one audio source per clip, no echo).
       // When two clips share the same audio element (e.g. after a split), only the
-      // clip whose timeline range contains the playhead controls playback of that element.
-      const handledAudio = new Set<HTMLAudioElement>();
+      // clip whose half-open range [startTime, startTime+duration) contains the
+      // playhead controls playback of that element.
+      const activeAudioClip = project.clips.find(
+        (c) =>
+          c.trackType === 'audio' &&
+          ct >= c.startTime &&
+          ct < c.startTime + c.duration
+      );
+      const audioElementController = new Map<
+        HTMLAudioElement,
+        { clip: TimelineClip; isActive: boolean }
+      >();
       for (const [clipId, audio] of audioElementsRef.current) {
-        if (handledAudio.has(audio)) continue;
         const clip = project.clips.find((c) => c.id === clipId);
         if (!clip) continue;
+        const isActive = clip.id === activeAudioClip?.id;
+        const existing = audioElementController.get(audio);
+        if (!existing || (isActive && !existing.isActive)) {
+          audioElementController.set(audio, { clip, isActive });
+        }
+      }
+      const handledAudio = new Set<HTMLAudioElement>();
+      for (const [clipId, audio] of audioElementsRef.current) {
+        const clip = project.clips.find((c) => c.id === clipId);
+        if (!clip) continue;
+        if (handledAudio.has(audio)) continue;
         handledAudio.add(audio);
-        const clipStart = clip.startTime;
-        const clipEnd = clipStart + clip.duration;
+        const ctrl = audioElementController.get(audio);
+        if (!ctrl) continue;
+        const { clip: ctrlClip, isActive } = ctrl;
+        const clipStart = ctrlClip.startTime;
+        const clipEnd = clipStart + ctrlClip.duration;
         const relTime = ct - clipStart;
         // source time = sourceStart + (timelineTime - startTime) * speed
-        const sourceTime = clip.sourceStart + relTime * clip.speed;
+        const sourceTime = ctrlClip.sourceStart + relTime * ctrlClip.speed;
         // Update mute/volume in case user changed them mid-session
-        audio.muted = clip.muted;
-        audio.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
-        if (isPlaying && ct >= clipStart && ct <= clipEnd) {
+        audio.muted = ctrlClip.muted;
+        audio.volume = Math.max(0, Math.min(1, (ctrlClip.volume || 100) / 100));
+        if (isPlaying && isActive) {
           if (audio.paused) {
             try {
               audio.currentTime = Math.max(0, sourceTime);
@@ -654,31 +689,104 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           } else if (Math.abs(audio.currentTime - sourceTime) > 0.1) {
             audio.currentTime = Math.max(0, sourceTime);
           }
-        } else if (!audio.paused) {
-          try { audio.pause(); } catch {}
+        } else if (!isActive && !audio.paused) {
+          if (!activeAudioClip) {
+            try { audio.pause(); } catch {}
+          }
         }
       }
+      // Sync <video> elements with playhead. One element per source; shared after split.
+      // Only the clip whose half-open range [startTime, startTime+duration) contains the
+      // playhead controls its element — inactive clips sharing the same element never pause it.
+      const activeVideoClip = project.clips.find(
+        (c) =>
+          c.trackType === 'video' &&
+          c.sourceType === 'uploaded-video' &&
+          ct >= c.startTime &&
+          ct < c.startTime + c.duration
+      );
+      const elementController = new Map<
+        HTMLVideoElement,
+        { clip: TimelineClip; isActive: boolean }
+      >();
       for (const [clipId, el] of mediaElementsRef.current) {
         const clip = project.clips.find((c) => c.id === clipId);
         if (!clip || !(el instanceof HTMLVideoElement)) continue;
-        const clipStart = clip.startTime;
-        const clipEnd = clipStart + clip.duration;
+        const isActive = clip.id === activeVideoClip?.id;
+        const existing = elementController.get(el);
+        // Active clip takes priority over an inactive clip sharing the same element
+        if (!existing || (isActive && !existing.isActive)) {
+          elementController.set(el, { clip, isActive });
+        }
+      }
+      const handledElements = new Set<HTMLVideoElement>();
+      for (const [clipId, el] of mediaElementsRef.current) {
+        const clip = project.clips.find((c) => c.id === clipId);
+        if (!clip || !(el instanceof HTMLVideoElement)) continue;
+        if (handledElements.has(el)) continue;
+        handledElements.add(el);
+        const ctrl = elementController.get(el);
+        if (!ctrl) continue;
+        const { clip: ctrlClip, isActive } = ctrl;
+        const clipStart = ctrlClip.startTime;
+        const clipEnd = clipStart + ctrlClip.duration;
         const relTime = ct - clipStart;
         // source time = sourceStart + (timelineTime - startTime) * speed
-        const sourceTime = clip.sourceStart + relTime * clip.speed;
-        el.muted = clip.muted;
-        el.volume = Math.max(0, Math.min(1, (clip.volume || 100) / 100));
-        if (isPlaying && ct >= clipStart && ct <= clipEnd) {
+        const sourceTime = ctrlClip.sourceStart + relTime * ctrlClip.speed;
+        el.muted = ctrlClip.muted;
+        el.volume = Math.max(0, Math.min(1, (ctrlClip.volume || 100) / 100));
+        // Debug metrics for the active video element
+        if (isActive && el.videoWidth > 0) {
+          setDebugActiveClipId(ctrlClip.id);
+          setDebugSourceTime(Number(sourceTime.toFixed(3)));
+          setDebugReadyState(el.readyState);
+          setDebugPaused(el.paused);
+        }
+        if (isPlaying && isActive) {
+          // If a seek is already pending for this element, wait for seeked or 500 ms timeout
+          const pending = seekPendingRef.current;
+          if (pending && pending.el === el) {
+            const seeked = Math.abs(el.currentTime - pending.targetTime) < 0.1;
+            if (seeked || performance.now() > pending.deadline) {
+              seekPendingRef.current = null;
+              try {
+                el.play().catch((err) => {
+                  setIsPlaying(false);
+                  setDebugLastError(`${err.name}: ${err.message}`);
+                  triggerToast(
+                    `Playback error: ${err.name}: ${err.message}`,
+                    `प्लेबैक त्रुटि: ${err.name}: ${err.message}`
+                  );
+                });
+              } catch (err) {
+                setIsPlaying(false);
+                const msg = err instanceof Error ? err.message : String(err);
+                const name = err instanceof Error ? err.name : 'Unknown';
+                setDebugLastError(`${name}: ${msg}`);
+                triggerToast(
+                  `Playback error: ${name}: ${msg}`,
+                  `प्लेबैक त्रुटि: ${name}: ${msg}`
+                );
+              }
+            }
+            continue;
+          }
           if (el.paused) {
             try {
               el.currentTime = Math.max(0, sourceTime);
-              el.play().catch(() => {});
-            } catch {}
+              seekPendingRef.current = { el, targetTime: sourceTime, deadline: performance.now() + 500 };
+            } catch {
+              // ignore
+            }
           } else if (Math.abs(el.currentTime - sourceTime) > 0.5) {
             el.currentTime = Math.max(0, sourceTime);
           }
-        } else if (!el.paused) {
-          try { el.pause(); } catch {}
+        } else if (!isActive && !el.paused) {
+          // Non-active clip sharing this element: do not pause — only the active clip controls playback
+          // If no clip is active at all (playhead between clips or at end), pause everything
+          if (!activeVideoClip) {
+            try { el.pause(); } catch {}
+          }
         }
       }
 
@@ -690,7 +798,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             c.sourceType === 'uploaded-video' &&
             !c.muted &&
             ct >= c.startTime &&
-            ct <= c.startTime + c.duration
+            ct < c.startTime + c.duration
         );
         if (activeVideo && activeVideo.mediaUrl) {
           const vid = videoRef.current;
@@ -2693,11 +2801,34 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
             {/* Preview Playback Debug */}
             <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
-              <div className="font-bold text-slate-200 text-sm">Preview Debug</div>
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-slate-200 text-sm">Preview Debug</div>
+                <button
+                  type="button"
+                  onClick={() => setShowPlaybackDebug((p) => !p)}
+                  aria-label="Toggle playback debug detail"
+                  className={`min-w-[32px] min-h-[32px] rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center shrink-0`}
+                >
+                  {showPlaybackDebug ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+              </div>
               <div className="font-mono text-xs">Video: {debugVideoDims}</div>
               <div className="font-mono text-xs">Preview FPS: {debugPreviewFps}</div>
               <div className="font-mono text-xs">Dropped Frames: {debugDroppedFrames}</div>
               <div className="font-mono text-xs">Playing: {debugPlaying ? 'yes' : 'no'}</div>
+              {showPlaybackDebug && (
+                <div className="space-y-1 pt-1 border-t border-slate-800/50">
+                  <div className="font-mono text-xs">Active clip: {debugActiveClipId ?? '—'}</div>
+                  <div className="font-mono text-xs">Source time: {debugSourceTime.toFixed(3)}s</div>
+                  <div className="font-mono text-xs">Ready state: {debugReadyState}</div>
+                  <div className="font-mono text-xs">Paused: {debugPaused ? 'yes' : 'no'}</div>
+                  {debugLastError && (
+                    <div className="font-mono text-xs text-amber-400 truncate" title={debugLastError}>
+                      Last error: {debugLastError}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
