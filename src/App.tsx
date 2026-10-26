@@ -627,9 +627,9 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       if (isPlaying) {
         const next = playheadRef.current + dt;
         if (next >= totalDuration) {
-          playheadRef.current = 0;
+          playheadRef.current = totalDuration;
           setIsPlaying(false);
-          setPlayheadTime(0);
+          setPlayheadTime(totalDuration);
         } else {
           playheadRef.current = next;
         }
@@ -693,7 +693,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               audio.play().catch(() => {});
             } catch {}
           } else if (Math.abs(audio.currentTime - sourceTime) > 0.1) {
-            audio.currentTime = Math.max(0, sourceTime);
+            // Do not re-arm seek every frame — let the element play continuously.
+            // Seeks only happen via the seekPendingRef path above (on clip transition / resume).
           }
         } else {
           // Not playing or not active: pause AND mute this element
@@ -798,7 +799,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               // ignore
             }
           } else if (Math.abs(el.currentTime - sourceTime) > 0.5) {
-            el.currentTime = Math.max(0, sourceTime);
+            // Do not re-arm seek every frame — let the element play continuously.
+            // Seeks only happen via the seekPendingRef path above (on clip transition / resume).
           }
         } else {
           // Not playing or not active: pause this element (includes active clip when paused)
@@ -863,6 +865,45 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         } else if (!videoRef.current.paused) {
           try { videoRef.current.pause(); } catch {}
         }
+      }
+
+      // Test-only debug hook (VITE_TEST_MODE): expose playback state for Playwright diagnostics.
+      if (import.meta.env.VITE_TEST_MODE) {
+        const dbgEls: Array<Record<string, unknown>> = [];
+        mediaElementsRef.current.forEach((el) => {
+          if (el instanceof HTMLVideoElement) {
+            dbgEls.push({
+              tag: 'VIDEO-CACHED',
+              currentTime: Number(el.currentTime.toFixed(3)),
+              paused: el.paused,
+              muted: el.muted,
+              readyState: el.readyState,
+            });
+          }
+        });
+        if (videoRef.current) {
+          dbgEls.push({
+            tag: 'VIDEO-VISIBLE',
+            currentTime: Number(videoRef.current.currentTime.toFixed(3)),
+            paused: videoRef.current.paused,
+            muted: videoRef.current.muted,
+            readyState: videoRef.current.readyState,
+          });
+        }
+        (window as any).__debug = {
+          playheadTime: playheadRef.current,
+          isPlaying,
+          totalDuration,
+          showPlainVideo,
+          activeClipId: activeVideoClip?.id ?? null,
+          activeSourceTime: activeVideoClip
+            ? Number(
+                (activeVideoClip.sourceStart +
+                  (playheadRef.current - activeVideoClip.startTime) * (activeVideoClip.speed || 1)).toFixed(3)
+              )
+            : null,
+          elements: dbgEls,
+        };
       }
 
       const qualityMode = isExportingVideo ? 'export-full' : 'preview-540p';
@@ -1025,6 +1066,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   // Test mode: load the pre-pushed test video directly without the system picker.
   // Only available when VITE_TEST_MODE=true (never in the normal release APK).
+  // In browser tests, window.__TEST_VIDEO_URL__ can override the mediaUrl.
   const handleLoadTestVideo = () => {
     if (!import.meta.env.VITE_TEST_MODE) return;
     const testClip = createBaseClip({
@@ -1037,8 +1079,12 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       sourceType: 'uploaded-video',
     });
     // Override source-specific fields for the test video
+    const testVideoUrl =
+      (typeof window !== 'undefined' &&
+        (window as any).__TEST_VIDEO_URL__) ||
+      'file:///sdcard/Movies/test-video.mp4';
     Object.assign(testClip, {
-      mediaUrl: 'file:///sdcard/Movies/test-video.mp4',
+      mediaUrl: testVideoUrl,
       sourceStart: 0,
       sourceEnd: 10,
       speed: 1,
