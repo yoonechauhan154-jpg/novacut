@@ -67,96 +67,49 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  emulator-tests:
-    name: Emulator Tests (Maestro)
-    needs: build-android-apk
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+  browser-tests:
+    name: Playwright Browser Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Download APK Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ClipNova-Debug-APK
-          path: ./apk/
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
       - name: Install ffmpeg
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+
+      - name: Generate Test Media
         run: |
-          sudo apt-get update -y && sudo apt-get install -y ffmpeg
+          ffmpeg -y -f lavfi -i testsrc2=duration=12:size=720x1280:rate=30 -f lavfi -i sine=frequency=440:duration=12 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-12s.webm
+          ffmpeg -y -f lavfi -i testsrc2=duration=8:size=720x1280:rate=30 -f lavfi -i sine=frequency=523:duration=8 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-8s.webm
 
-      - name: Generate 10s test video with audio tone
+      - name: Start Dev Server
         run: |
-          ffmpeg -y -f lavfi -i testsrc=duration=10:size=720x1280:rate=30 \
-            -f lavfi -i sine=frequency=440:duration=10 \
-            -c:v libx264 -pix_fmt yuv420p -preset fast -crf 23 \
-            -c:a aac -b:a 128k -shortest \
-            /tmp/test-video.mp4
+          VITE_TEST_MODE=true npm run dev &
+          sleep 5
+        # dev server runs in background
 
-      - name: Set up KVM for emulator
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm || true
-          ls -l /dev/kvm || echo "/dev/kvm not found - software rendering only"
-          sudo usermod -a -G kvm $USER || true
+      - name: Run Playwright Tests
+        run: npx playwright test --timeout=90000 --workers=1 --reporter=line
 
-      - name: Run Emulator and Maestro Tests
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 30
-          arch: x86_64
-          target: default
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -camera-back none -camera-front none
-          force-avd-creation: true
-          emulator-boot-timeout: 900
-          disable-animations: true
-          script: |
-            curl -Ls "https://github.com/mobile-dev-inc/maestro/releases/latest/download/maestro-$(uname -m)-linux" -o /tmp/maestro && chmod +x /tmp/maestro && sudo mv /tmp/maestro /usr/local/bin/maestro
-            adb wait-for-device
-            adb install -r -d /home/runner/work/novacut/novacut/apk/app-debug.apk
-            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_VIDEO
-            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_IMAGES
-            adb shell pm grant com.clipnova.editor android.permission.READ_MEDIA_AUDIO
-            adb shell pm grant com.clipnova.editor android.permission.RECORD_AUDIO
-            adb shell mkdir -p /sdcard/Movies
-            adb push /tmp/test-video.mp4 /sdcard/Movies/test-video.mp4
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/launch.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/new-project.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/play.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/split-play.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/pause-echo.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/playhead-drag.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/one-panel.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/features.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/edit-ops.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/language-switch.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/export.yaml
-            /usr/local/bin/maestro test /home/runner/work/novacut/novacut/.maestro/back-button.yaml
-
-      - name: Collect failure artifacts
-        if: failure()
-        run: |
-          adb shell screencap -p /sdcard/failure-screenshot.png 2>/dev/null || true
-          adb pull /sdcard/failure-screenshot.png ./failure-screenshot.png 2>/dev/null || true
-          adb logcat -d > ./logcat.txt 2>/dev/null || true
-          mkdir -p ./maestro-output
-          maestro cloud --format junit --output ./maestro-output/results.xml 2>/dev/null || true
-
-      - name: Upload failure artifacts
-        if: failure()
+      - name: Upload Test Results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: emulator-test-artifacts
+          name: playwright-test-results
           path: |
-            failure-screenshot.png
-            logcat.txt
-            maestro-output/
+            test-results/
+            playwright-report/
           retention-days: 30

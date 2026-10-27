@@ -98,7 +98,7 @@ import {
   registerHardwareBackButton,
   saveAndShareFileOnDevice,
 } from './utils/androidBridge';
-import { renderProjectFrame } from './utils/canvasRenderer';
+import { getAspectDimensions, renderProjectFrame } from './utils/canvasRenderer';
 import { inspectAndImportMediaFile } from './utils/mediaImporter';
 import {
   deleteProjectFromStorage,
@@ -174,23 +174,6 @@ export function App() {
     [lang]
   );
 
-  // Global Pro Mode toggle (persisted in localStorage)
-  const [globalProUnlocked, setGlobalProUnlocked] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('clipnova_pro_v3') === 'true';
-    } catch {
-      return false;
-    }
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('clipnova_pro_v3', String(globalProUnlocked));
-    } catch {
-      // ignore
-    }
-  }, [globalProUnlocked]);
-
   // Saved Projects List (Loaded from IndexedDB + guarded localStorage fallback)
   const [projects, setProjects] = useState<ProjectData[]>([]);
   const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
@@ -210,8 +193,6 @@ export function App() {
       gradientTo: '#1E293B',
       blurAmount: 20,
     },
-    watermarkEnabled: true,
-    isProUnlocked: false,
     importedMedia: [],
     clips: [],
   }));
@@ -318,6 +299,10 @@ export function App() {
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
   const [exportFormat, setExportFormat] = useState<'mp4' | 'webm'>('mp4');
+  const [exportResult, setExportResult] = useState<{format: string; resolution: string; duration: number; frames: number; size: number; hasAudio: boolean} | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [overlayVisible, setOverlayVisible] = useState<boolean>(true);
+  const overlayHideRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Refs for Canvas, Media Elements, Active Export Cancellation & RAF Slider Throttling
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1208,8 +1193,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         gradientTo: '#1E293B',
         blurAmount: 20,
       },
-      watermarkEnabled: !globalProUnlocked,
-      isProUnlocked: globalProUnlocked,
       importedMedia: orderedItems,
       clips: initialClips,
     };
@@ -1886,8 +1869,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         gradientTo: '#1E293B',
         blurAmount: 20,
       },
-      watermarkEnabled: !globalProUnlocked,
-      isProUnlocked: globalProUnlocked,
       clips: tpl.clips.map((c) => ({ ...c, id: `${c.id}-${Date.now()}` })),
     };
     await saveProjectToStorage(newProj);
@@ -1901,8 +1882,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       id: `proj-sample-${Date.now()}`,
       name: 'Sample Project (Demo Reel)',
       updatedAt: new Date().toISOString(),
-      watermarkEnabled: !globalProUnlocked,
-      isProUnlocked: globalProUnlocked,
       clips: INITIAL_PROJECT.clips.map((c) => ({ ...c, id: `${c.id}-${Date.now()}` })),
     };
     await saveProjectToStorage(sampleProj);
@@ -1929,11 +1908,24 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   const handleStartVideoExport = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Resize canvas to export-full dimensions BEFORE creating captureStream
+    // so the stream captures at the correct resolution.
+    const { width: expW, height: expH } = getAspectDimensions(
+      project.aspectRatio,
+      'export-full',
+      project.resolution
+    );
+    ctx.canvas.width = expW;
+    ctx.canvas.height = expH;
+
     setIsExportingVideo(true);
     setExportProgress(0);
     setExportedVideoUrl(null);
     setExportedVideoBlob(null);
-    setIsPlaying(false);
+    setExportResult(null);
     exportCancelledRef.current = false;
 
     try {
@@ -1959,7 +1951,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       audioElementsRef.current.forEach((el) => addAudioTracks(el));
 
       // Pick MP4 (H.264 + AAC) if the WebView supports it, otherwise fall back to WebM.
-      // Order per user request: try MP4 first, then WebM.
       let mimeType = 'video/webm';
       let useMp4 = false;
       if (exportFormat === 'mp4' && typeof MediaRecorder !== 'undefined') {
@@ -1988,6 +1979,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       const recorder = new MediaRecorder(combinedStream, { mimeType });
       exportRecorderRef.current = recorder;
       const chunks: Blob[] = [];
+      let frameCount = 0;
+      let hasAudio = false;
 
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunks.push(e.data);
@@ -1997,16 +1990,28 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         if (exportCancelledRef.current) {
           setIsExportingVideo(false);
           setExportProgress(0);
+          setIsPlaying(false);
           triggerToast('Export cancelled.', 'एक्सपोर्ट रद्द किया गया।');
           return;
         }
         const ext = useMp4 ? 'mp4' : 'webm';
         const blob = new Blob(chunks, { type: useMp4 ? 'video/mp4' : 'video/webm' });
         const url = URL.createObjectURL(blob);
+        const audioTracks = combinedStream.getAudioTracks();
+        hasAudio = audioTracks.length > 0;
         setExportedVideoBlob(blob);
         setExportedVideoUrl(url);
+        setExportResult({
+          format: useMp4 ? 'MP4 (H.264 + AAC)' : 'WebM (VP9)',
+          resolution: project.resolution,
+          duration: totalDuration,
+          frames: frameCount,
+          size: blob.size,
+          hasAudio,
+        });
         setIsExportingVideo(false);
         setExportProgress(100);
+        setIsPlaying(false);
         triggerToast(
           useMp4
             ? 'Video rendered (.mp4)! Tap Save & Share below.'
@@ -2017,32 +2022,34 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         );
       };
 
-      recorder.start();
+      recorder.start(1000);
 
-      const exportDuration = Math.min(totalDuration, 6);
-      const totalSteps = 50;
-      let step = 0;
+      // Keep media playing during export so audio is captured and video frames advance.
+      setIsPlaying(true);
+
+      const exportDuration = totalDuration;
+      const startTime = performance.now();
 
       exportIntervalRef.current = setInterval(() => {
         if (exportCancelledRef.current) {
           if (exportIntervalRef.current) clearInterval(exportIntervalRef.current);
           return;
         }
-        step++;
-        const simTime = (step / totalSteps) * totalDuration;
-        // Update both ref and state so canvas renders correct frames during export
-        playheadRef.current = simTime;
-        setPlayheadTime(simTime);
-        setExportProgress(Math.min(99, Math.round((step / totalSteps) * 100)));
+        const elapsed = (performance.now() - startTime) / 1000;
+        const progress = Math.min(99, Math.round((elapsed / exportDuration) * 100));
+        setExportProgress(progress);
+        frameCount = Math.round(elapsed * project.fps);
 
-        if (step >= totalSteps) {
+        if (elapsed >= exportDuration) {
           if (exportIntervalRef.current) clearInterval(exportIntervalRef.current);
+          setIsPlaying(false);
           if (recorder.state !== 'inactive') recorder.stop();
         }
-      }, (exportDuration * 420) / totalSteps);
+      }, 200);
     } catch (err) {
       setIsExportingVideo(false);
       setExportProgress(0);
+      setIsPlaying(false);
       triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
@@ -2053,6 +2060,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       clearInterval(exportIntervalRef.current);
       exportIntervalRef.current = null;
     }
+    setIsPlaying(false);
     try {
       if (exportRecorderRef.current && exportRecorderRef.current.state !== 'inactive') {
         exportRecorderRef.current.stop();
@@ -2082,6 +2090,28 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       item.id.toLowerCase().includes(q)
     );
   });
+
+  // Screen orientation toggle for fullscreen preview (Capacitor plugin with CSS fallback)
+  const toggleScreenOrientation = async () => {
+    try {
+      // @ts-expect-error - Capacitor plugin imported at runtime
+      const { Plugins } = window.capacitor || {};
+      const ScreenOrientation = Plugins?.ScreenOrientation;
+      if (ScreenOrientation) {
+        const current = await ScreenOrientation.getCurrentOrientation();
+        if (current.type === 'PORTRAIT_PRIMARY' || current.type === 'PORTRAIT_SECONDARY') {
+          await ScreenOrientation.lock({ orientation: 'LANDSCAPE_PRIMARY' });
+        } else {
+          await ScreenOrientation.lock({ orientation: 'PORTRAIT_PRIMARY' });
+        }
+        return;
+      }
+    } catch {
+      // Plugin not available — fall through to CSS rotation
+    }
+    // CSS fallback: rotate the preview container by 90 degrees
+    // (handled by the fullscreen overlay's rotate button via class toggle)
+  };
 
   // Helper to render a touch-friendly 44px Slider Row with numeric readout and Reset button
   const renderTouchSlider = (opts: {
@@ -2212,11 +2242,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                   <span className="font-display text-lg font-bold tracking-tight text-slate-100 truncate">
                     ClipNova
                   </span>
-                  {globalProUnlocked && (
-                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-semibold">
-                      PRO
-                    </span>
-                  )}
                 </div>
                 <div className="text-[11px] font-mono text-slate-500 truncate">
                   v3.0 · Build: {BUILD_ID.slice(0, 7)}
@@ -2908,31 +2933,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               </div>
             </div>
 
-            {/* Pro / Watermark Toggle */}
-            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 flex items-center justify-between gap-3">
-              <div className="space-y-0.5">
-                <div className="text-sm font-bold text-slate-100">{t(lang, 'settingsProMode')}</div>
-                <div className="text-xs text-slate-400">
-                  Disables watermark on exports and unlocks 2K/4K presets.
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={globalProUnlocked}
-                onChange={(e) => {
-                  const val = e.target.checked;
-                  setGlobalProUnlocked(val);
-                  setProject((p) => ({
-                    ...p,
-                    isProUnlocked: val,
-                    watermarkEnabled: !val,
-                  }));
-                }}
-                aria-label="Toggle Pro Mode"
-                className="w-5 h-5 accent-amber-500 cursor-pointer shrink-0"
-              />
-            </div>
-
             {/* Studio Blueprint & Checklist Links */}
             <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-2.5">
               <button
@@ -3115,6 +3115,17 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               <div className="absolute top-2 inset-x-3 bg-amber-500/90 text-slate-950 text-xs font-semibold px-3 py-1 rounded-lg text-center">
                 Tap 3+ points on preview to draw mask ({selectedClip?.customMaskPoints?.length || 0} pts)
               </div>
+            )}
+            {/* Fullscreen button (bottom-right of preview) */}
+            {!isFullscreen && (
+              <button
+                type="button"
+                onClick={() => setIsFullscreen(true)}
+                aria-label="Enter fullscreen preview"
+                className="absolute bottom-2 right-2 min-w-[44px] min-h-[44px] rounded-xl bg-black/60 hover:bg-black/80 text-slate-100 flex items-center justify-center z-10 backdrop-blur-sm"
+              >
+                <Maximize2 className="w-5 h-5" />
+              </button>
             )}
           </div>
 
@@ -4934,9 +4945,47 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                     className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                   >
                     <Check className="w-4 h-4" />
-                    <span>{t(lang, 'downloadVideoBtn')}</span>
+                    <span>
+                      {t(lang, 'downloadVideoBtn')} ({exportedVideoBlob?.type === 'video/mp4' ? '.mp4' : '.webm'})
+                    </span>
                   </button>
                 )}
+              </div>
+
+              {/* Export Result Info: format, resolution, duration, frames, size, audio */}
+              {exportResult && (
+                <div className="p-3 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
+                  <div className="text-xs font-bold text-slate-100 mb-1">{t(lang, 'exportResultTitle')}</div>
+                  <div className="text-[10px] text-slate-300 space-y-0.5">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultFormat')}</span>
+                      <span className="font-mono text-amber-400">{exportResult.format}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultResolution')}</span>
+                      <span className="font-mono text-amber-400">{exportResult.resolution}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultDuration')}</span>
+                      <span className="font-mono text-amber-400">{exportResult.duration.toFixed(1)}s</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultFrames')}</span>
+                      <span className="font-mono text-amber-400">{exportResult.frames}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultSize')}</span>
+                      <span className="font-mono text-amber-400">{(exportResult.size / 1024 / 1024).toFixed(2)} MB</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">{t(lang, 'exportResultAudio')}</span>
+                      <span className={"font-mono " + (exportResult.hasAudio ? 'text-emerald-400' : 'text-rose-400')}>
+                        {exportResult.hasAudio ? t(lang, 'exportResultAudioYes') : t(lang, 'exportResultAudioNo')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -4954,6 +5003,130 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                     Export .FCPXML
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* FULLSCREEN PREVIEW OVERLAY */}
+      {/* ===================================================================== */}
+      {isFullscreen && (
+        <div
+          className="fixed inset-0 z-50 bg-black flex items-center justify-center"
+          onTouchStart={() => {
+            setOverlayVisible(true);
+            if (overlayHideRef.current) clearTimeout(overlayHideRef.current);
+            overlayHideRef.current = setTimeout(() => setOverlayVisible(false), 3000);
+          }}
+        >
+          {/* Video fills screen, aspect ratio preserved */}
+          <div className="relative w-full h-full flex items-center justify-center bg-black">
+            <video
+              ref={videoRef}
+              className="max-w-full max-h-full w-auto h-auto object-contain"
+              playsInline
+              preload="auto"
+              onPointerDown={handleCanvasPointerDown}
+            />
+            <canvas
+              ref={canvasRef}
+              className="max-w-full max-h-full w-auto h-auto object-contain absolute inset-0"
+              style={{ pointerEvents: 'none' }}
+            />
+          </div>
+
+          {/* Controls overlay (auto-hides after 3s) */}
+          <div
+            className={"absolute inset-0 flex flex-col justify-between p-4 pointer-events-none " + (overlayVisible ? 'opacity-100 transition-opacity duration-300' : 'opacity-0 transition-opacity duration-300')}
+          >
+            {/* Top: close button */}
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setIsFullscreen(false)}
+                aria-label="Close fullscreen"
+                className="min-w-[44px] min-h-[44px] rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Middle: play/pause, prev/next */}
+            <div className="flex items-center justify-center gap-4 pointer-events-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaying(false);
+                  setPlayheadTime(0);
+                }}
+                aria-label="Previous"
+                className="min-w-[44px] min-h-[44px] rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
+              >
+                <SkipBack className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.resume();
+                  setIsPlaying((p) => !p);
+                }}
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+                className="min-w-[44px] min-h-[44px] rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center"
+              >
+                {isPlaying ? (
+                  <Pause className="w-5 h-5 fill-current" />
+                ) : (
+                  <Play className="w-5 h-5 fill-current" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlaying(false);
+                  setPlayheadTime(totalDuration);
+                }}
+                aria-label="Next"
+                className="min-w-[44px] min-h-[44px] rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
+              >
+                <SkipForward className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Bottom: seek bar + time + rotate */}
+            <div className="flex flex-col gap-2 pb-4 pointer-events-auto w-full">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white font-mono">{playheadTime.toFixed(1)}s</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={totalDuration}
+                  step={0.03}
+                  value={playheadTime}
+                  onChange={(e) => {
+                    setIsPlaying(false);
+                    setPlayheadTime(Number(e.target.value));
+                  }}
+                  onPointerDown={() => {
+                    if (overlayHideRef.current) clearTimeout(overlayHideRef.current);
+                  }}
+                  onPointerUp={() => {
+                    overlayHideRef.current = setTimeout(() => setOverlayVisible(false), 3000);
+                  }}
+                  className="flex-1 accent-amber-500 cursor-pointer touch-none"
+                  style={{ touchAction: 'none' }}
+                />
+                <span className="text-xs text-white font-mono">{totalDuration.toFixed(1)}s</span>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <button
+                  type="button"
+                  onClick={toggleScreenOrientation}
+                  aria-label="Rotate screen"
+                  className="min-w-[44px] min-h-[44px] rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
+                >
+                  <RotateCw className="w-5 h-5" />
+                </button>
               </div>
             </div>
           </div>

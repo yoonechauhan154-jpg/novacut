@@ -239,8 +239,6 @@ export interface ProjectData {
   updatedAt: string;
   thumbnailUrl?: string;
   background: CanvasBackgroundConfig;
-  watermarkEnabled: boolean;
-  isProUnlocked: boolean;
   importedMedia?: ImportedMediaItem[];
   clips: TimelineClip[];
 }

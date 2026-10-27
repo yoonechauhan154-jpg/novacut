@@ -971,21 +971,4 @@ export function renderProjectFrame(
 
     ctx.restore();
   }
-
-  // Watermark for Free Tier (removable in Pro)
-  if (project.watermarkEnabled && !project.isProUnlocked) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-    ctx.beginPath();
-    ctx.roundRect(w - 148, 18, 130, 32, 8);
-    ctx.fill();
-    ctx.font = '600 13px "Outfit", sans-serif';
-    ctx.fillStyle = '#F8FAFC';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('ClipNova · FREE', w - 28, 34);
-    ctx.restore();
-  }
-
-  ctx.restore();
 }

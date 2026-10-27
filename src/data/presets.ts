@@ -353,8 +353,6 @@ export const INITIAL_PROJECT: ProjectData = {
     gradientTo: '#1E293B',
     blurAmount: 24,
   },
-  watermarkEnabled: true,
-  isProUnlocked: false,
   clips: [
     // 1. Main Video Clips (Untouched Original Footage)
     createBaseClip({
