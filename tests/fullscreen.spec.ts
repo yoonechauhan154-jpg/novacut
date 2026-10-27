@@ -191,29 +191,29 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   let mediaCount = await page.evaluate(() => (window as any).__probe?.playingMediaCount || 0);
   console.log('Playing media count in fullscreen:', mediaCount);
 
-  // Play the video
-  const playBtn = page.locator('button[aria-label="Pause"]').first();
-  if (await playBtn.count() > 0) {
+  // Play the video - scope selectors within fullscreen overlay
+  const overlayPlayBtn = fsOverlay.locator('button[aria-label="Pause"]').first();
+  if (await overlayPlayBtn.count() > 0) {
     // Already playing
   } else {
-    const playPauseBtn = page.locator('button[aria-label="Play"]').first();
-    await playPauseBtn.click();
+    const playPauseBtn = fsOverlay.locator('button[aria-label="Play"]').first();
+    await playPauseBtn.click({ force: true });
     await page.waitForTimeout(1000);
   }
 
   mediaCount = await page.evaluate(() => (window as any).__probe?.playingMediaCount || 0);
   expect(mediaCount).toBe(1, 'Exactly 1 media element should be playing in fullscreen');
 
-  // Drag the seek bar
-  const seekInput = page.locator('input[type="range"]').first();
+  // Drag the seek bar - scope within overlay
+  const seekInput = fsOverlay.locator('input[type="range"]').first();
   await expect(seekInput).toBeVisible({ timeout: 5000 });
-  await seekInput.click();
+  await seekInput.click({ force: true });
   await page.waitForTimeout(500);
 
   // Pause the video
-  const pauseBtn = page.locator('button[aria-label="Pause"]').first();
+  const pauseBtn = fsOverlay.locator('button[aria-label="Pause"]').first();
   if (await pauseBtn.count() > 0) {
-    await pauseBtn.click();
+    await pauseBtn.click({ force: true });
     await page.waitForTimeout(500);
   }
 
@@ -221,7 +221,7 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   expect(mediaCount).toBe(0, '0 media elements should be playing after pause');
 
   // Verify close button exists
-  const closeBtn = page.locator('button[aria-label="Close fullscreen"]').first();
+  const closeBtn = fsOverlay.locator('button[aria-label="Close fullscreen"]').first();
   await expect(closeBtn).toBeVisible({ timeout: 5000 });
 
   // Record playhead before exit
