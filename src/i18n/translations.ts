@@ -184,6 +184,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     exportResultAudio: 'Audio',
     exportResultAudioYes: 'Yes',
     exportResultAudioNo: 'No',
+    exportLogCopied: 'Export log copied to clipboard.',
   },
   hi: {
     // Home Screen & Tabs
@@ -357,6 +358,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     exportResultAudio: 'ऑडियो',
     exportResultAudioYes: 'हाँ',
     exportResultAudioNo: 'नहीं',
+    exportLogCopied: 'एक्सपोर्ट लॉग क्लिपबोर्ड पर कॉपी किया गया।',
   },
 };
 

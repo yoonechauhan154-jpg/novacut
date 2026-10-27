@@ -7,16 +7,7 @@ const PROBE_SCRIPT = `
   const events = [];
   const MAX_EVENTS = 500;
   function logEvent(type, el, detail = {}) {
-    events.push({
-      t: performance.now(),
-      type,
-      id: el.id || el.dataset.clipId || 'unknown',
-      tag: el.tagName,
-      currentTime: el.currentTime !== undefined ? Number(el.currentTime.toFixed(3)) : null,
-      paused: el.paused !== undefined ? el.paused : null,
-      readyState: el.readyState !== undefined ? el.readyState : null,
-      ...detail,
-    });
+    events.push({ t: performance.now(), type, id: el.id || el.dataset.clipId || 'unknown', tag: el.tagName, ...detail });
     if (events.length > MAX_EVENTS) events.shift();
   }
   const origAddEventListener = EventTarget.prototype.addEventListener;
@@ -50,65 +41,13 @@ const PROBE_SCRIPT = `
     logEvent('pause-called', el);
     return origPause.call(this);
   };
-  let activeAudioSources = 0;
-  let audioContextSuspended = false;
-  const origAudioContext = window.AudioContext || window.webkitAudioContext;
-  if (origAudioContext) {
-    const wrappedAudioContext = function (...args) {
-      const ctx = new origAudioContext(...args);
-      const origCreateBufferSource = ctx.createBufferSource.bind(ctx);
-      ctx.createBufferSource = function (...args) {
-        const node = origCreateBufferSource(...args);
-        const origStart = node.start;
-        node.start = function (...args) { activeAudioSources++; return origStart.call(this, ...args); };
-        const origStop = node.stop;
-        node.stop = function (...args) { activeAudioSources = Math.max(0, activeAudioSources - 1); return origStop.call(this, ...args); };
-        const origDisconnect = node.disconnect;
-        node.disconnect = function (...args) { activeAudioSources = Math.max(0, activeAudioSources - 1); return origDisconnect.call(this, ...args); };
-        return node;
-      };
-      const origCreateMediaElementSource = ctx.createMediaElementSource.bind(ctx);
-      ctx.createMediaElementSource = function (mediaElement) {
-        const node = origCreateMediaElementSource(mediaElement);
-        const origConnect = node.connect;
-        node.connect = function (...args) { activeAudioSources++; return origConnect.call(this, ...args); };
-        const origDisconnect2 = node.disconnect;
-        node.disconnect = function (...args) { activeAudioSources = Math.max(0, activeAudioSources - 1); return origDisconnect2.call(this, ...args); };
-        return node;
-      };
-      const origSuspend = ctx.suspend.bind(ctx);
-      ctx.suspend = function (...args) { audioContextSuspended = true; return origSuspend(...args); };
-      const origResume = ctx.resume.bind(ctx);
-      ctx.resume = function (...args) { audioContextSuspended = false; return origResume(...args); };
-      return ctx;
-    };
-    wrappedAudioContext.prototype = origAudioContext.prototype;
-    window.AudioContext = wrappedAudioContext;
-    if (window.webkitAudioContext) window.webkitAudioContext = wrappedAudioContext;
-  }
   window.__probe = {
     get events() { return events; },
     clearEvents() { events.length = 0; },
-    get playingMediaCount() {
-      let count = 0;
-      document.querySelectorAll('video, audio').forEach((el) => { if (!el.paused) count++; });
-      return count;
-    },
-    get activeAudioSources() { return activeAudioSources; },
-    get audioContextSuspended() { return audioContextSuspended; },
     getMediaState() {
       const els = [];
       document.querySelectorAll('video, audio').forEach((el) => {
-        els.push({
-          id: el.id || el.dataset.clipId || 'unknown',
-          tag: el.tagName,
-          currentTime: el.currentTime,
-          paused: el.paused,
-          readyState: el.readyState,
-          muted: el.muted,
-          volume: el.volume,
-          duration: el.duration,
-        });
+        els.push({ id: el.id || el.dataset.clipId || 'unknown', tag: el.tagName, currentTime: el.currentTime, paused: el.paused, readyState: el.readyState, muted: el.muted, volume: el.volume, duration: el.duration });
       });
       return els;
     },
@@ -147,7 +86,11 @@ const completeOnboarding = async (page) => {
   }
 };
 
-test('EXPORT: produces a real video (not a photo) with audio, respecting format selector', async ({ page }) => {
+test('EXPORT: produces a real video (not a photo) with audio, respecting format selector', async ({ page, browserName }) => {
+  // CPU throttling x6 to simulate a slow mobile device
+  const client = await page.context().newCDPSession(page);
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+
   await page.addInitScript(PROBE_SCRIPT);
 
   await page.goto('/', { waitUntil: 'domcontentloaded' });
@@ -169,7 +112,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   await page.waitForTimeout(1000);
   await playBtn.click(); // pause again
 
-  // Open export modal (header button says "Export")
+  // Open export modal
   const headerExportBtn = page.locator('button:has-text("Export"), button:has-text("एक्सपोर्ट")').first();
   await expect(headerExportBtn).toBeVisible({ timeout: 5000 });
   await headerExportBtn.click();
@@ -181,23 +124,20 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   await mp4Btn.click();
   await page.waitForTimeout(300);
 
-  // Start export (modal button says "Render & Export Video (1080p · 30fps)")
+  // Start export
   const startBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
   await expect(startBtn).toBeVisible({ timeout: 5000 });
   await startBtn.click();
 
-  // Wait for export to complete (12s project = ~12s real-time + buffer)
-  await page.waitForTimeout(15000);
+  // Wait for export to complete (with throttling, may take longer)
+  await page.waitForTimeout(30000);
 
   // Verify export result is shown
   const exportResult = page.locator('text=Export Result').first();
   await expect(exportResult).toBeVisible({ timeout: 5000 });
 
-  // Check result details
-  const formatText = await page.locator('text=Format').first().textContent();
-  console.log('Export format:', formatText);
-  const hasAudioText = await page.locator('text=Audio').first().textContent();
-  console.log('Export audio:', hasAudioText);
+  const verified = await page.locator('text=Verified').first();
+  await expect(verified).toBeVisible({ timeout: 5000 });
 
   // Download the exported file
   const downloadPromise = page.waitForEvent('download');
@@ -207,7 +147,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   const download = await downloadPromise;
 
   const downloadPath = download.suggestedFilename();
-  const filePath = `/tmp/${downloadPath}`;
+  const filePath = `test-exports/${downloadPath}`;
   await download.saveAs(filePath);
 
   // Verify with ffprobe
@@ -235,6 +175,8 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
     videoStreams: videoStreams.length,
     audioStreams: audioStreams.length,
     videoFrames: videoStreams[0]?.nb_frames || 'unknown',
+    videoCodec: videoStreams[0]?.codec_name,
+    audioCodec: audioStreams[0]?.codec_name,
   }));
 
   // Assertions
@@ -242,21 +184,76 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   expect(audioStreams.length).toBeGreaterThan(0, 'Exported file must have an audio stream');
 
   const duration = parseFloat(format.duration || '0');
-  // Read expected project duration from app debug state
-  const dbg = await page.evaluate(() => (window as any).__debug || {});
-  const expectedDuration = dbg?.totalDuration || 10;
-  expect(duration).toBeGreaterThan(expectedDuration * 0.9, `Video duration should be ~${expectedDuration}s, got ${duration}s`);
-  expect(duration).toBeLessThan(expectedDuration * 1.1, `Video duration should be ~${expectedDuration}s, got ${duration}s`);
+  // Project is 12s (test clip), expect within 5%
+  expect(duration).toBeGreaterThan(12 * 0.95, `Video duration should be ~12s, got ${duration}s`);
+  expect(duration).toBeLessThan(12 * 1.05, `Video duration should be ~12s, got ${duration}s`);
 
-  // More than 100 frames (not 1 frame = photo)
+  // More than 100 frames (not 1 frame = photo) - at 30fps for 12s = 360 frames
   const nbFrames = videoStreams[0]?.nb_frames;
   if (nbFrames && nbFrames !== 'unknown') {
     expect(parseInt(nbFrames, 10)).toBeGreaterThan(100, `Expected >100 frames, got ${nbFrames}`);
   }
 
-  // Container format matches selection
+  // Container format should be MP4
   const formatName = format.format_name || '';
-  expect(formatName).toMatch(/matroska|webm|mov|mp4|isom/, `Unexpected container: ${formatName}`);
+  expect(formatName).toMatch(/mp4|isom/, `Expected MP4 container, got: ${formatName}`);
 
   console.log('EXPORT TEST PASSED:', downloadPath);
+});
+
+test('EXPORT: negative test - stalled video element aborts with clear error', async ({ page }) => {
+  const client = await page.context().newCDPSession(page);
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+
+  await page.addInitScript(PROBE_SCRIPT);
+
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('text=ClipNova')).toBeVisible({ timeout: 15000 });
+
+  await completeOnboarding(page);
+
+  await page.evaluate((url) => { (window as any).__TEST_VIDEO_URL__ = url; }, TEST_VIDEO_URL);
+  const loadBtn = page.locator('button:has-text("Load test video")').first();
+  await expect(loadBtn).toBeVisible({ timeout: 5000 });
+  await loadBtn.click();
+  await page.waitForTimeout(3000);
+
+  // Simulate a stalled video element: block seeked events forever
+  await page.evaluate(() => {
+    const orig = HTMLVideoElement.prototype.addEventListener;
+    HTMLVideoElement.prototype.addEventListener = function (type, listener, options) {
+      if (type === 'seeked') {
+        // Never fire seeked - simulates stalled media
+        return;
+      }
+      return orig.call(this, type, listener, options);
+    };
+  });
+
+  const headerExportBtn = page.locator('button:has-text("Export"), button:has-text("एक्सपोर्ट")').first();
+  await expect(headerExportBtn).toBeVisible({ timeout: 5000 });
+  await headerExportBtn.click();
+  await page.waitForTimeout(500);
+
+  const mp4Btn = page.locator('button:has-text("MP4")').first();
+  await expect(mp4Btn).toBeVisible({ timeout: 5000 });
+  await mp4Btn.click();
+  await page.waitForTimeout(300);
+
+  const startBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
+  await expect(startBtn).toBeVisible({ timeout: 5000 });
+  await startBtn.click();
+
+  // Wait for error to appear
+  await page.waitForTimeout(15000);
+
+  // Should show an error, not success
+  const errorToast = page.locator('text=Export error, text=Too many seek failures, text=Export failed: frames are not changing').first();
+  await expect(errorToast).toBeVisible({ timeout: 5000 });
+
+  // Verify no Verified badge appears
+  const verified = page.locator('text=Verified');
+  await expect(verified).toHaveCount(0);
+
+  console.log('NEGATIVE EXPORT TEST PASSED');
 });

@@ -95,6 +95,9 @@ jobs:
           ffmpeg -y -f lavfi -i testsrc2=duration=12:size=720x1280:rate=30 -f lavfi -i sine=frequency=440:duration=12 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-12s.webm
           ffmpeg -y -f lavfi -i testsrc2=duration=8:size=720x1280:rate=30 -f lavfi -i sine=frequency=523:duration=8 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-8s.webm
 
+      - name: Create test-exports directory
+        run: mkdir -p test-exports
+
       - name: Start Dev Server
         run: |
           VITE_TEST_MODE=true npm run dev &
@@ -112,4 +115,12 @@ jobs:
           path: |
             test-results/
             playwright-report/
+          retention-days: 30
+
+      - name: Upload Exported Test Files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exported-test-files
+          path: test-exports/
           retention-days: 30
