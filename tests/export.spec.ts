@@ -87,6 +87,7 @@ const completeOnboarding = async (page) => {
 };
 
 test('EXPORT: produces a real video (not a photo) with audio, respecting format selector', async ({ page, browserName }) => {
+  test.setTimeout(180000); // 3 minutes — frame-by-frame encoding with CPU throttling is slow
   // CPU throttling x6 to simulate a slow mobile device
   const client = await page.context().newCDPSession(page);
   await client.send('Emulation.setCPUThrottlingRate', { rate: 6 });
