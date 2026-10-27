@@ -187,50 +187,21 @@ export async function checkResolutionSupported(
 /* ------------------------------------------------------------------ */
 
 /**
- * Seek a video element to a target time and wait for a decoded frame.
+ * Seek a video element to a target time.
+ * Sets currentTime synchronously and returns immediately without waiting for seeked.
+ * The browser decodes the nearest frame on the next RAF.
+ * Returns true if the element is ready (readyState >= 2), false otherwise.
  */
 async function seekToFrame(
   el: HTMLVideoElement,
   targetTime: number,
   timeoutMs: number = 3000
 ): Promise<boolean> {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const deadline = Date.now() + timeoutMs;
-
-    const onSeeked = () => {
-      if (resolved) return;
-      resolved = true;
-      el.removeEventListener('seeked', onSeeked);
-      el.removeEventListener('error', onErrorCb);
-      resolve(true);
-    };
-
-    const onErrorCb = () => {
-      if (resolved) return;
-      resolved = true;
-      el.removeEventListener('seeked', onSeeked);
-      el.removeEventListener('error', onErrorCb);
-      resolve(false);
-    };
-
-    const checkTimeout = () => {
-      if (resolved) return;
-      if (Date.now() > deadline) {
-        resolved = true;
-        el.removeEventListener('seeked', onSeeked);
-        el.removeEventListener('error', onErrorCb);
-        resolve(false);
-        return;
-      }
-      requestAnimationFrame(checkTimeout);
-    };
-
-    el.addEventListener('seeked', onSeeked, { once: true });
-    el.addEventListener('error', onErrorCb, { once: true });
-    el.currentTime = targetTime;
-    requestAnimationFrame(checkTimeout);
-  });
+  if (el.readyState < 2) return false;
+  const prevTime = el.currentTime;
+  el.currentTime = targetTime;
+  // currentTime assignment is synchronous; if it changed, seek was initiated
+  return Math.abs(el.currentTime - prevTime) > 0.001 || el.currentTime === targetTime;
 }
 
 /* ------------------------------------------------------------------ */
