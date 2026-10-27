@@ -87,7 +87,7 @@ const completeOnboarding = async (page) => {
 };
 
 test('EXPORT: produces a real video (not a photo) with audio, respecting format selector', async ({ page, browserName }) => {
-  test.setTimeout(120000); // 2 minutes for export + verification
+  test.setTimeout(90000); // 90 seconds for export + verification
   // Mobile viewport simulates phone; WebCodecs frame-by-frame encoding is deterministic regardless of speed
   const client = await page.context().newCDPSession(page);
 
@@ -132,7 +132,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   // Wait for export to complete (with CPU throttling x6, frame-by-frame encoding is slow)
   // Poll for either success (Export Result) or error toast
   let exportDone = false;
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < 12; i++) {
     await page.waitForTimeout(5000);
     const resultVisible = await page.locator('text=Export Result').count();
     const errorVisible = await page.locator('text=Export error, text=Export warning').count();
@@ -141,7 +141,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
       break;
     }
   }
-  expect(exportDone).toBeTruthy('Export did not complete within 120 seconds');
+  expect(exportDone).toBeTruthy('Export did not complete within 60 seconds');
 
   // Verify export result is shown
   const exportResult = page.locator('text=Export Result').first();
@@ -195,11 +195,11 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   expect(audioStreams.length).toBeGreaterThan(0, 'Exported file must have an audio stream');
 
   const duration = parseFloat(format.duration || '0');
-  // Project is 12s (test clip), expect within 5%
-  expect(duration).toBeGreaterThan(12 * 0.95, `Video duration should be ~12s, got ${duration}s`);
-  expect(duration).toBeLessThan(12 * 1.05, `Video duration should be ~12s, got ${duration}s`);
+  // Project is 5s (test clip), expect within 5%
+  expect(duration).toBeGreaterThan(5 * 0.95, `Video duration should be ~5s, got ${duration}s`);
+  expect(duration).toBeLessThan(5 * 1.05, `Video duration should be ~5s, got ${duration}s`);
 
-  // More than 100 frames (not 1 frame = photo) - at 30fps for 12s = 360 frames
+  // More than 100 frames (not 1 frame = photo) - at 30fps for 5s = 150 frames
   const nbFrames = videoStreams[0]?.nb_frames;
   if (nbFrames && nbFrames !== 'unknown') {
     expect(parseInt(nbFrames, 10)).toBeGreaterThan(100, `Expected >100 frames, got ${nbFrames}`);
