@@ -129,8 +129,19 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   await expect(startBtn).toBeVisible({ timeout: 5000 });
   await startBtn.click();
 
-  // Wait for export to complete (with throttling, may take longer)
-  await page.waitForTimeout(30000);
+  // Wait for export to complete (with CPU throttling x6, frame-by-frame encoding is slow)
+  // Poll for either success (Export Result) or error toast
+  let exportDone = false;
+  for (let i = 0; i < 24; i++) {
+    await page.waitForTimeout(5000);
+    const resultVisible = await page.locator('text=Export Result').count();
+    const errorVisible = await page.locator('text=Export error, text=Export warning').count();
+    if (resultVisible > 0 || errorVisible > 0) {
+      exportDone = true;
+      break;
+    }
+  }
+  expect(exportDone).toBeTruthy('Export did not complete within 120 seconds');
 
   // Verify export result is shown
   const exportResult = page.locator('text=Export Result').first();
@@ -244,11 +255,11 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   await expect(startBtn).toBeVisible({ timeout: 5000 });
   await startBtn.click();
 
-  // Wait for error to appear
+  // Wait for error to appear (seek timeouts: 3s each × 3 retries ≈ 9s)
   await page.waitForTimeout(15000);
 
-  // Should show an error, not success
-  const errorToast = page.locator('text=Export error, text=Too many seek failures, text=Export failed: frames are not changing').first();
+  // Should show an error toast, not success
+  const errorToast = page.locator(':has-text("Export error"), :has-text("Too many seek failures"), :has-text("frames are not changing")').first();
   await expect(errorToast).toBeVisible({ timeout: 5000 });
 
   // Verify no Verified badge appears
