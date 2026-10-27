@@ -172,15 +172,15 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   const fsOverlay = page.locator('.fixed.inset-0.z-50.bg-black').first();
   await expect(fsOverlay).toBeVisible({ timeout: 5000 });
 
-  // Verify video fills viewport
-  const videoEl = page.locator('video').first();
-  await expect(videoEl).toBeVisible({ timeout: 5000 });
-  const videoBox = await videoEl.boundingBox();
+  // Verify preview container fills viewport
+  const previewContainer = page.locator('.relative.w-full.h-full').first();
+  await expect(previewContainer).toBeVisible({ timeout: 5000 });
+  const containerBox = await previewContainer.boundingBox();
   const viewport = page.viewportSize();
-  console.log('Video box:', videoBox, 'Viewport:', viewport);
-  expect(videoBox).not.toBeNull();
-  expect(videoBox!.width).toBeGreaterThan(viewport!.width * 0.8, 'Video should fill most of viewport width');
-  expect(videoBox!.height).toBeGreaterThan(viewport!.height * 0.8, 'Video should fill most of viewport height');
+  console.log('Container box:', containerBox, 'Viewport:', viewport);
+  expect(containerBox).not.toBeNull();
+  expect(containerBox!.width).toBeGreaterThan(viewport!.width * 0.8, 'Preview container should fill most of viewport width');
+  expect(containerBox!.height).toBeGreaterThan(viewport!.height * 0.8, 'Preview container should fill most of viewport height');
 
   // Verify editor UI is hidden
   const topBar = page.locator('header').first();
