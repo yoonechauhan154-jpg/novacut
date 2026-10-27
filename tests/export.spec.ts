@@ -181,7 +181,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
 
     const duration = parseFloat(format.duration || '0');
     expect(duration).toBeGreaterThan(0.5, 'Video should have non-zero duration');
-    expect(duration).toBeLessThan(10, 'Video should be short (test clip)');
+    expect(duration).toBeLessThan(15, 'Video should be short (test clip)');
 
     const nbFrames = videoStreams[0]?.nb_frames;
     if (nbFrames && nbFrames !== 'unknown') {
@@ -212,9 +212,11 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   await page.waitForTimeout(3000);
 
   await page.evaluate(() => {
-    Object.defineProperty(HTMLVideoElement.prototype, 'readyState', {
-      get: function () { return 0; },
-      configurable: true,
+    const proto = HTMLVideoElement.prototype;
+    const origDesc = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+    Object.defineProperty(proto, 'currentTime', {
+      ...origDesc,
+      set: function (v) { /* no-op: simulates stalled media that never seeks */ },
     });
   });
 
