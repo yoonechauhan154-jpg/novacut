@@ -563,10 +563,9 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
 
     if (cancelRef.current) return false;
 
-    // Wait one RAF for the video to decode after seek
-    await new Promise((r) => requestAnimationFrame(r));
-
-    if (cancelRef.current) return false;
+    // Brief delay for the browser to decode the seeked frame.
+    // Use setTimeout instead of requestAnimationFrame for reliability in headless mode.
+    await new Promise((r) => setTimeout(r, 16));
 
     // Draw the frame to canvas
     renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
