@@ -5022,16 +5022,18 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         >
           {/* Video fills screen, aspect ratio preserved */}
           <div className="relative w-full h-full flex items-center justify-center bg-black">
+            {/* Plain video element for hardware-decoded playback when no effects active */}
             <video
               ref={videoRef}
-              className="max-w-full max-h-full w-auto h-auto object-contain"
+              className={`max-w-full max-h-full w-auto h-auto object-contain ${showPlainVideo ? '' : 'hidden'}`}
               playsInline
               preload="auto"
               onPointerDown={handleCanvasPointerDown}
             />
+            {/* Canvas for effects/adjustments/layers — hidden when plain video suffices */}
             <canvas
               ref={canvasRef}
-              className="max-w-full max-h-full w-auto h-auto object-contain absolute inset-0"
+              className={`max-w-full max-h-full w-auto h-auto object-contain absolute inset-0 ${showPlainVideo ? 'hidden' : ''}`}
               style={{ pointerEvents: 'none' }}
             />
           </div>

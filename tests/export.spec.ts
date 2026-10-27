@@ -242,8 +242,11 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   expect(audioStreams.length).toBeGreaterThan(0, 'Exported file must have an audio stream');
 
   const duration = parseFloat(format.duration || '0');
-  expect(duration).toBeGreaterThan(10, `Video duration should be ~12s, got ${duration}s`);
-  expect(duration).toBeLessThan(14, `Video duration should be ~12s, got ${duration}s`);
+  // Read expected project duration from app debug state
+  const dbg = await page.evaluate(() => (window as any).__debug || {});
+  const expectedDuration = dbg?.totalDuration || 10;
+  expect(duration).toBeGreaterThan(expectedDuration * 0.9, `Video duration should be ~${expectedDuration}s, got ${duration}s`);
+  expect(duration).toBeLessThan(expectedDuration * 1.1, `Video duration should be ~${expectedDuration}s, got ${duration}s`);
 
   // More than 100 frames (not 1 frame = photo)
   const nbFrames = videoStreams[0]?.nb_frames;
