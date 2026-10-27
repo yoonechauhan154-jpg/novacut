@@ -229,16 +229,13 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   await loadBtn.click();
   await page.waitForTimeout(3000);
 
-  // Simulate a stalled video element: block seeked events forever
+  // Simulate a stalled video element: readyState never reaches 2, so seekToFrame returns false
+  // After 3 consecutive failures, the export should abort with a clear error
   await page.evaluate(() => {
-    const orig = HTMLVideoElement.prototype.addEventListener;
-    HTMLVideoElement.prototype.addEventListener = function (type, listener, options) {
-      if (type === 'seeked') {
-        // Never fire seeked - simulates stalled media
-        return;
-      }
-      return orig.call(this, type, listener, options);
-    };
+    Object.defineProperty(HTMLVideoElement.prototype, 'readyState', {
+      get: function () { return 0; },
+      configurable: true,
+    });
   });
 
   const headerExportBtn = page.locator('button:has-text("Export"), button:has-text("एक्सपोर्ट")').first();
