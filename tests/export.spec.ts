@@ -169,10 +169,10 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   await page.waitForTimeout(1000);
   await playBtn.click(); // pause again
 
-  // Open export modal
-  const exportBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
-  await expect(exportBtn).toBeVisible({ timeout: 5000 });
-  await exportBtn.click();
+  // Open export modal (header button says "Export")
+  const headerExportBtn = page.locator('button:has-text("Export"), button:has-text("एक्सपोर्ट")').first();
+  await expect(headerExportBtn).toBeVisible({ timeout: 5000 });
+  await headerExportBtn.click();
   await page.waitForTimeout(500);
 
   // Select MP4 format
@@ -181,8 +181,8 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   await mp4Btn.click();
   await page.waitForTimeout(300);
 
-  // Start export
-  const startBtn = page.locator('button:has-text("Render & Export Video")').first();
+  // Start export (modal button says "Render & Export Video (1080p · 30fps)")
+  const startBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
   await expect(startBtn).toBeVisible({ timeout: 5000 });
   await startBtn.click();
 

@@ -162,17 +162,11 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   await loadBtn.click();
   await page.waitForTimeout(3000);
 
-  // Record playhead before fullscreen
-  const playheadBefore = await page.locator('.font-mono.tabular-nums.text-xs.text-slate-300').first().textContent();
-  console.log('Playhead before fullscreen:', playheadBefore);
-
-  // Enter fullscreen
-  const fsBtn = page.locator('button:has-text("Enter fullscreen"), button[aria-label="Enter fullscreen preview"]').first();
-  // The fullscreen button uses Maximize2 icon, not text. Find it by position/class
-  const fsButton = page.locator('button:has(svg.lucide-maximize-2), button:has([data-lucide="maximize-2"])').first();
+  // Enter fullscreen - button has aria-label and Maximize2 icon, no text
+  const fsButton = page.locator('button[aria-label="Enter fullscreen preview"]').first();
   await expect(fsButton).toBeVisible({ timeout: 5000 });
   await fsButton.click();
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1500);
 
   // Verify fullscreen overlay is visible
   const fsOverlay = page.locator('.fixed.inset-0.z-50.bg-black').first();
@@ -180,9 +174,11 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
 
   // Verify video fills viewport
   const videoEl = page.locator('video').first();
+  await expect(videoEl).toBeVisible({ timeout: 5000 });
   const videoBox = await videoEl.boundingBox();
   const viewport = page.viewportSize();
   console.log('Video box:', videoBox, 'Viewport:', viewport);
+  expect(videoBox).not.toBeNull();
   expect(videoBox!.width).toBeGreaterThan(viewport!.width * 0.8, 'Video should fill most of viewport width');
   expect(videoBox!.height).toBeGreaterThan(viewport!.height * 0.8, 'Video should fill most of viewport height');
 
@@ -224,7 +220,7 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   expect(mediaCount).toBe(0, '0 media elements should be playing after pause');
 
   // Verify close button exists
-  const closeBtn = page.locator('button:has(svg.lucide-x), button:has([data-lucide="x"])').first();
+  const closeBtn = page.locator('button[aria-label="Close fullscreen"]').first();
   await expect(closeBtn).toBeVisible({ timeout: 5000 });
 
   // Record playhead before exit
