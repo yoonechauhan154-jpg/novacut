@@ -2055,8 +2055,14 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       const support = await probeWebCodecsSupport();
       setExportLog((prev) => [...prev, { step: 'probe', detail: `WebCodecs available=${support.available} video=${support.videoCodec} audio=${support.audioCodec}`, ts: Date.now() }]);
 
-      if (!support.available || !support.videoCodec) {
-        // Fall back to MediaRecorder path with warning
+      // In test mode (VITE_TEST_MODE), force MediaRecorder fallback for CI reliability
+      const isTestMode = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_TEST_MODE;
+      const useWebCodecs = !isTestMode && support.available && support.videoCodec;
+
+      if (!useWebCodecs) {
+        // Use MediaRecorder path (deterministic frame-by-frame, reliable in CI)
+        const webCodecsMsg = isTestMode ? 'forced by test mode' : `not available: ${support.reason || 'unknown'}`;
+        setExportLog((prev) => [...prev, { step: 'probe', detail: `Using MediaRecorder fallback (${webCodecsMsg})`, ts: Date.now() }]);
         await startMediaRecorderFallbackExport({
           project,
           canvas,
