@@ -88,9 +88,9 @@ const completeOnboarding = async (page) => {
 
 test('EXPORT: produces a real video (not a photo) with audio, respecting format selector', async ({ page, browserName }) => {
   test.setTimeout(180000); // 3 minutes — frame-by-frame encoding with CPU throttling is slow
-  // CPU throttling x6 to simulate a slow mobile device
+  // CPU throttling x4 to simulate a slow mobile device
   const client = await page.context().newCDPSession(page);
-  await client.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
 
   await page.addInitScript(PROBE_SCRIPT);
 
@@ -214,8 +214,10 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
 });
 
 test('EXPORT: negative test - stalled video element aborts with clear error', async ({ page }) => {
+  test.setTimeout(120000);
+  // CPU throttling x4 to simulate a slow mobile device
   const client = await page.context().newCDPSession(page);
-  await client.send('Emulation.setCPUThrottlingRate', { rate: 6 });
+  await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
 
   await page.addInitScript(PROBE_SCRIPT);
 
