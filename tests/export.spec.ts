@@ -199,10 +199,11 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   // Either way, the export handles the stalled video gracefully — no crash, no hang.
   const errorToast = page.locator(':has-text("Export error"), :has-text("Too many seek failures"), :has-text("frames are not changing")').first();
   const exportResult = page.locator('text=Export Result').first();
-  await Promise.race([
-    expect(errorToast).toBeVisible({ timeout: 10000 }),
-    expect(exportResult).toBeVisible({ timeout: 10000 }),
-  ]);
+  try {
+    await expect(errorToast).toBeVisible({ timeout: 5000 });
+  } catch {
+    await expect(exportResult).toBeVisible({ timeout: 10000 });
+  }
 
   // If export completed, verify it did NOT get a "Verified" badge (stalled media should not verify)
   if (await exportResult.isVisible()) {
