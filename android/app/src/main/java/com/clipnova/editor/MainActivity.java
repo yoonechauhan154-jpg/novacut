@@ -28,17 +28,11 @@ public class MainActivity extends BridgeActivity {
     WebView webView = getBridge().getWebView();
     final BridgeWebViewClient capClient = (BridgeWebViewClient) webView.getWebViewClient();
     webView.setWebViewClient(new WebViewClient() {
-      @Override
       public void onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         super.onRenderProcessGone(view, detail);
         String reason = "unknown";
         if (detail != null) {
-          switch (detail.getReason()) {
-            case RenderProcessGoneDetail.RENDERER_CRASHED: reason = "RENDERER_CRASHED"; break;
-            case RenderProcessGoneDetail.RENDERER_KILLED: reason = "RENDERER_KILLED"; break;
-            case RenderProcessGoneDetail.RENDERER_OOM: reason = "RENDERER_OOM"; break;
-            default: reason = "RENDERER_GONE_" + detail.getReason(); break;
-          }
+          reason = detail.toString();
         }
         // Tell JS the renderer crashed so it can show the trace dialog.
         try {
@@ -51,7 +45,6 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {}
       }
 
-      @Override
       public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
         if (capClient != null) {
           return capClient.shouldOverrideUrlLoading(view, request);
