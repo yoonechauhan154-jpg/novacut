@@ -401,10 +401,12 @@ export function App() {
     let mounted = true;
 
     async function checkCrashOnStart() {
-      if (!exportFinished()) {
-        const steps = getTrace();
-        const last = steps.length > 0 ? steps[steps.length - 1] : null;
-        setCrashLastStep(last ? `${last.step}: ${last.detail}` : 'unknown (no trace)');
+      const steps = getTrace();
+      // Only show the crash dialog if there are trace entries AND the last one
+      // isn't "export-finished" (meaning the previous export crashed).
+      if (steps.length > 0 && !exportFinished()) {
+        const last = steps[steps.length - 1];
+        setCrashLastStep(`${last.step}: ${last.detail}`);
         // Read native process exit reasons
         try {
           const reasons = await getNativeExitReasons();
