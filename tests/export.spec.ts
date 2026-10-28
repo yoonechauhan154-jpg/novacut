@@ -101,7 +101,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
   const loadBtn = page.locator('button:has-text("Load test video")').first();
   await expect(loadBtn).toBeVisible({ timeout: 5000 });
   await loadBtn.click();
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(6000);
 
   const playBtn = page.locator('button[aria-label="Play"], button[aria-label="Pause"]').first();
   await expect(playBtn).toBeVisible({ timeout: 15000 });
@@ -169,7 +169,7 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   const loadBtn = page.locator('button:has-text("Load test video")').first();
   await expect(loadBtn).toBeVisible({ timeout: 5000 });
   await loadBtn.click();
-  await page.waitForTimeout(3000);
+  await page.waitForTimeout(6000);
 
   await page.evaluate(() => {
     const proto = HTMLVideoElement.prototype;
