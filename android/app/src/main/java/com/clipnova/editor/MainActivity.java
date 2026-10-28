@@ -28,7 +28,7 @@ public class MainActivity extends BridgeActivity {
     WebView webView = getBridge().getWebView();
     final BridgeWebViewClient capClient = (BridgeWebViewClient) webView.getWebViewClient();
     webView.setWebViewClient(new WebViewClient() {
-      public void onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+      public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         super.onRenderProcessGone(view, detail);
         String reason = "unknown";
         if (detail != null) {
@@ -43,6 +43,7 @@ public class MainActivity extends BridgeActivity {
         try {
           webView.postDelayed(() -> webView.reload(), 1000);
         } catch (Exception ignored) {}
+        return true;
       }
 
       public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
