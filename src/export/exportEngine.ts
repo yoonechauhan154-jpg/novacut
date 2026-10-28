@@ -540,6 +540,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     );
 
     const seekPromises: Promise<boolean>[] = [];
+    let frameSeekFailed = false;
     for (const clip of videoClips) {
       const el = getClipVideoElement(clip);
       if (!el) continue;
@@ -552,7 +553,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
         seeks++;
         seekPromises.push(
           seekToFrame(el, sourceTime).then((ok) => {
-            if (!ok) seekFailures++;
+            if (!ok) frameSeekFailed = true;
             return ok;
           })
         );
@@ -560,6 +561,8 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     }
 
     await Promise.all(seekPromises);
+
+    if (frameSeekFailed) return false;
 
     if (cancelRef.current) return false;
 
