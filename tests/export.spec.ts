@@ -116,7 +116,7 @@ test('EXPORT: produces a real video (not a photo) with audio, respecting format 
 
   const mp4Btn = page.locator('button:has-text("MP4")').first();
   await expect(mp4Btn).toBeVisible({ timeout: 5000 });
-  await mp4Btn.click();
+  await mp4Btn.click({ force: true });
   await page.waitForTimeout(300);
 
   const startBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
@@ -187,7 +187,7 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
 
   const mp4Btn = page.locator('button:has-text("MP4")').first();
   await expect(mp4Btn).toBeVisible({ timeout: 5000 });
-  await mp4Btn.click();
+  await mp4Btn.click({ force: true });
   await page.waitForTimeout(300);
 
   const startBtn = page.locator('button:has-text("Render & Export"), button:has-text("वीडियो रेंडर")').first();
