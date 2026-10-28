@@ -3,7 +3,6 @@ package com.clipnova.editor;
 import android.os.Bundle;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
-import android.webkit.WebViewClient;
 import androidx.core.view.WindowCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebViewClient;
@@ -22,12 +21,11 @@ public class MainActivity extends BridgeActivity {
     getBridge().getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
 
     // --- Renderer crash visibility ---
-    // If the WebView renderer process is killed (OOM, encoder crash, SIGKILL),
-    // keep the app alive, reload the web view, and tell JS "renderer crashed"
-    // so it can show the last export trace.
+    // Subclass BridgeWebViewClient (NOT plain WebViewClient) so Capacitor's
+    // shouldInterceptRequest still serves https://localhost/ from app assets.
+    // Only onRenderProcessGone is overridden; everything else delegates to super.
     WebView webView = getBridge().getWebView();
-    final BridgeWebViewClient capClient = (BridgeWebViewClient) webView.getWebViewClient();
-    webView.setWebViewClient(new WebViewClient() {
+    webView.setWebViewClient(new BridgeWebViewClient(getBridge()) {
       public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
         super.onRenderProcessGone(view, detail);
         String reason = "unknown";
@@ -44,13 +42,6 @@ public class MainActivity extends BridgeActivity {
           webView.postDelayed(() -> webView.reload(), 1000);
         } catch (Exception ignored) {}
         return true;
-      }
-
-      public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
-        if (capClient != null) {
-          return capClient.shouldOverrideUrlLoading(view, request);
-        }
-        return super.shouldOverrideUrlLoading(view, request);
       }
     });
   }
