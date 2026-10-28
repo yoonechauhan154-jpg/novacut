@@ -69,7 +69,9 @@ export function exportFinished(): boolean {
 
 interface ProcessExitReason {
   reason: string | null;
+  status: number | null;
   description: string | null;
+  importance: number | null;
   rssPages: number | null;
   pssPages: number | null;
 }

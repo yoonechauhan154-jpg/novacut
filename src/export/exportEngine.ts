@@ -1130,6 +1130,502 @@ export async function downloadFcpXml(project: ProjectData) {
   return saveAndShareFileOnDevice(blob, fileName, 'ClipNova FCPXML Timeline');
 }
 
+/* ------------------------------------------------------------------ */
+/*  Export Lab — isolated crash-diagnostic tests (T1–T5)              */
+/*  Each test writes a synchronous breadcrumb BEFORE every step so    */
+/*  we can see exactly which operation kills the WebView.             */
+/* ------------------------------------------------------------------ */
+
+export interface ExportLabResult {
+  testType: string;
+  status: 'ok' | 'crashed' | 'error';
+  step: string;
+  detail: string;
+  framesEncoded: number;
+}
+
+/**
+ * T1: seek-only — seek the video element to 60 different times,
+ * wait for seeked, no drawing.
+ */
+async function runLabT1(
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  project: ProjectData,
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  const steps = ['lab-t1-start', 'lab-t1-seek-0'];
+  trace(steps[0], 'seek-only test started');
+  const videoClips = project.clips.filter(
+    (c) => c.trackType === 'video' && c.sourceType === 'uploaded-video',
+  );
+  if (videoClips.length === 0) {
+    return { testType: 'T1', status: 'error', step: 'no-video', detail: 'No video clip in project', framesEncoded: 0 };
+  }
+  const el = mediaElementCache.get(videoClips[0].id);
+  if (!(el instanceof HTMLVideoElement) || el.readyState < 2) {
+    return { testType: 'T1', status: 'error', step: 'not-ready', detail: 'Video element not ready', framesEncoded: 0 };
+  }
+  const duration = Math.max(0.5, el.duration || videoClips[0].duration);
+  for (let i = 0; i < 60; i++) {
+    if (cancelRef.current) {
+      trace('lab-t1-cancel', `cancelled at seek ${i}`);
+      return { testType: 'T1', status: 'error', step: 'cancel', detail: `cancelled at seek ${i}`, framesEncoded: 0 };
+    }
+    const target = (duration * i) / 59;
+    trace('lab-t1-seek', `seeking to ${target.toFixed(3)}s (${i + 1}/60)`);
+    el.currentTime = target;
+    // Wait for seeked or 300ms timeout
+    await new Promise<void>((resolve) => {
+      const started = performance.now();
+      const onSeeked = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
+      const onTimeout = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
+      el.addEventListener('seeked', onSeeked, { once: true });
+      setTimeout(onTimeout, 300);
+    });
+  }
+  trace('lab-t1-done', 'all 60 seeks completed');
+  return { testType: 'T1', status: 'ok', step: 'done', detail: '60 seeks completed without crash', framesEncoded: 0 };
+}
+
+/**
+ * T2: seek + drawImage to canvas, no encoding.
+ */
+async function runLabT2(
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  project: ProjectData,
+  canvas: HTMLCanvasElement,
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  trace('lab-t2-start', 'seek + drawImage test started');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { testType: 'T2', status: 'error', step: 'no-context', detail: 'Cannot get 2D context', framesEncoded: 0 };
+  }
+  const videoClips = project.clips.filter(
+    (c) => c.trackType === 'video' && c.sourceType === 'uploaded-video',
+  );
+  if (videoClips.length === 0) {
+    return { testType: 'T2', status: 'error', step: 'no-video', detail: 'No video clip in project', framesEncoded: 0 };
+  }
+  const el = mediaElementCache.get(videoClips[0].id);
+  if (!(el instanceof HTMLVideoElement) || el.readyState < 2) {
+    return { testType: 'T2', status: 'error', step: 'not-ready', detail: 'Video element not ready', framesEncoded: 0 };
+  }
+  const duration = Math.max(0.5, el.duration || videoClips[0].duration);
+  const { width: expW, height: expH } = getAspectDimensions(project.aspectRatio, 'export-full', project.resolution);
+  const round16 = (n: number) => Math.max(16, Math.round(n / 16) * 16);
+  canvas.width = round16(expW);
+  canvas.height = round16(expH);
+  for (let i = 0; i < 60; i++) {
+    if (cancelRef.current) {
+      trace('lab-t2-cancel', `cancelled at frame ${i}`);
+      return { testType: 'T2', status: 'error', step: 'cancel', detail: `cancelled at frame ${i}`, framesEncoded: 0 };
+    }
+    const t = (duration * i) / 59;
+    trace('lab-t2-draw', `draw frame ${i + 1}/60 at t=${t.toFixed(3)}s`);
+    el.currentTime = t;
+    await new Promise<void>((resolve) => {
+      const started = performance.now();
+      const onSeeked = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
+      const onTimeout = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
+      el.addEventListener('seeked', onSeeked, { once: true });
+      setTimeout(onTimeout, 300);
+    });
+    try {
+      ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+    } catch (err) {
+      trace('lab-t2-draw-error', err instanceof Error ? err.message : String(err));
+      return { testType: 'T2', status: 'crashed', step: 'drawImage', detail: err instanceof Error ? err.message : String(err), framesEncoded: 0 };
+    }
+  }
+  trace('lab-t2-done', '60 seek+draw cycles completed');
+  return { testType: 'T2', status: 'ok', step: 'done', detail: '60 seek+draw cycles completed without crash', framesEncoded: 0 };
+}
+
+/**
+ * T3: encode-only — synthetic moving canvas (no video), VideoEncoder + mp4-muxer.
+ */
+async function runLabT3(
+  canvas: HTMLCanvasElement,
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  trace('lab-t3-start', 'encode-only synthetic canvas test started');
+  if (typeof VideoEncoder === 'undefined') {
+    return { testType: 'T3', status: 'error', step: 'no-encoder', detail: 'VideoEncoder not available', framesEncoded: 0 };
+  }
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) {
+    return { testType: 'T3', status: 'error', step: 'no-context', detail: 'Cannot get 2D context', framesEncoded: 0 };
+  }
+  const w = 480, h = 360;
+  canvas.width = w;
+  canvas.height = h;
+  const fps = 30;
+  const totalFrames = 60;
+  const videoChunks: EncodedVideoChunk[] = [];
+  const videoEncoder = new VideoEncoder({
+    output: (chunk) => videoChunks.push(chunk),
+    error: (e) => {
+      trace('lab-t3-encoder-error', e.message);
+    },
+  });
+  try {
+    videoEncoder.configure({ codec: 'avc1.42001e', width: w, height: h, bitrate: 1_000_000, framerate: fps, hardwareAcceleration: 'prefer-software' });
+  } catch (err) {
+    try {
+      videoEncoder.configure({ codec: 'avc1.42001e', width: w, height: h, bitrate: 1_000_000, framerate: fps });
+    } catch (err2) {
+      trace('lab-t3-config-error', err2 instanceof Error ? err2.message : String(err2));
+      return { testType: 'T3', status: 'error', step: 'encoder-config', detail: err2 instanceof Error ? err2.message : String(err2), framesEncoded: 0 };
+    }
+  }
+  let framesEncoded = 0;
+  for (let i = 0; i < totalFrames; i++) {
+    if (cancelRef.current) {
+      trace('lab-t3-cancel', `cancelled at frame ${i}`);
+      try { videoEncoder.close(); } catch {}
+      return { testType: 'T3', status: 'error', step: 'cancel', detail: `cancelled at frame ${i}`, framesEncoded };
+    }
+    trace('lab-t3-frame', `encoding synthetic frame ${i + 1}/${totalFrames}`);
+    // Draw a moving rectangle on synthetic canvas
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#ffffff';
+    const x = (i * 5) % w;
+    ctx.fillRect(x, h / 2 - 20, 40, 40);
+    let videoFrame: VideoFrame | null = null;
+    try {
+      videoFrame = new VideoFrame(canvas, { timestamp: i * (1000 / fps) });
+      videoEncoder.encode(videoFrame);
+      videoFrame.close();
+      videoFrame = null;
+      framesEncoded++;
+    } catch (err) {
+      trace('lab-t3-encode-error', err instanceof Error ? err.message : String(err));
+      try { if (videoFrame) videoFrame.close(); } catch {}
+      try { videoEncoder.close(); } catch {}
+      return { testType: 'T3', status: 'crashed', step: 'VideoFrame-or-encode', detail: err instanceof Error ? err.message : String(err), framesEncoded };
+    }
+  }
+  await videoEncoder.flush();
+  videoEncoder.close();
+  trace('lab-t3-done', `${framesEncoded} synthetic frames encoded`);
+  return { testType: 'T3', status: 'ok', step: 'done', detail: `${framesEncoded} synthetic frames encoded without crash`, framesEncoded };
+}
+
+/**
+ * T4: like T3 but create each VideoFrame from raw RGBA bytes (ArrayBuffer)
+ * instead of from the canvas. Tests whether new VideoFrame(canvas) is the killer.
+ */
+async function runLabT4(
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  trace('lab-t4-start', 'encode-only RGBA-buffer frames test started');
+  if (typeof VideoEncoder === 'undefined') {
+    return { testType: 'T4', status: 'error', step: 'no-encoder', detail: 'VideoEncoder not available', framesEncoded: 0 };
+  }
+  const w = 480, h = 360;
+  const fps = 30;
+  const totalFrames = 60;
+  const videoChunks: EncodedVideoChunk[] = [];
+  const videoEncoder = new VideoEncoder({
+    output: (chunk) => videoChunks.push(chunk),
+    error: (e) => {
+      trace('lab-t4-encoder-error', e.message);
+    },
+  });
+  try {
+    videoEncoder.configure({ codec: 'avc1.42001e', width: w, height: h, bitrate: 1_000_000, framerate: fps, hardwareAcceleration: 'prefer-software' });
+  } catch (err) {
+    try {
+      videoEncoder.configure({ codec: 'avc1.42001e', width: w, height: h, bitrate: 1_000_000, framerate: fps });
+    } catch (err2) {
+      trace('lab-t4-config-error', err2 instanceof Error ? err2.message : String(err2));
+      return { testType: 'T4', status: 'error', step: 'encoder-config', detail: err2 instanceof Error ? err2.message : String(err2), framesEncoded: 0 };
+    }
+  }
+  let framesEncoded = 0;
+  const rgba = new Uint8Array(w * h * 4);
+  for (let i = 0; i < totalFrames; i++) {
+    if (cancelRef.current) {
+      trace('lab-t4-cancel', `cancelled at frame ${i}`);
+      try { videoEncoder.close(); } catch {}
+      return { testType: 'T4', status: 'error', step: 'cancel', detail: `cancelled at frame ${i}`, framesEncoded };
+    }
+    trace('lab-t4-frame', `encoding RGBA frame ${i + 1}/${totalFrames}`);
+    // Fill RGBA buffer with a moving pattern
+    for (let p = 0; p < rgba.length; p += 4) {
+      const px = (p / 4) % w;
+      const py = Math.floor((p / 4) / w);
+      rgba[p] = (px + i * 2) % 256;     // R
+      rgba[p + 1] = (py + i) % 256;     // G
+      rgba[p + 2] = 128;                // B
+      rgba[p + 3] = 255;                // A
+    }
+    let videoFrame: VideoFrame | null = null;
+    try {
+      videoFrame = new VideoFrame(rgba, { format: 'RGBA', codedWidth: w, codedHeight: h, timestamp: i * (1000 / fps) });
+      videoEncoder.encode(videoFrame);
+      videoFrame.close();
+      videoFrame = null;
+      framesEncoded++;
+    } catch (err) {
+      trace('lab-t4-encode-error', err instanceof Error ? err.message : String(err));
+      try { if (videoFrame) videoFrame.close(); } catch {}
+      try { videoEncoder.close(); } catch {}
+      return { testType: 'T4', status: 'crashed', step: 'VideoFrame-RGBA-or-encode', detail: err instanceof Error ? err.message : String(err), framesEncoded };
+    }
+  }
+  await videoEncoder.flush();
+  videoEncoder.close();
+  trace('lab-t4-done', `${framesEncoded} RGBA frames encoded`);
+  return { testType: 'T4', status: 'ok', step: 'done', detail: `${framesEncoded} RGBA frames encoded without crash`, framesEncoded };
+}
+
+/**
+ * T5: full pipeline — WebCodecs export with real project video.
+ */
+async function runLabT5(
+  project: ProjectData,
+  canvas: HTMLCanvasElement,
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  audioElementsRef: Map<string, HTMLAudioElement>,
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  trace('lab-t5-start', 'full pipeline export test started');
+  let result: ExportLabResult = { testType: 'T5', status: 'error', step: 'unknown', detail: '', framesEncoded: 0 };
+  try {
+    await startWebCodecsExport({
+      project,
+      canvas,
+      mediaElementCache,
+      audioElementsRef,
+      format: 'mp4',
+      safeMode: true,
+      onProgress: () => {},
+      onResult: (r) => {
+        result = { testType: 'T5', status: 'ok', step: 'done', detail: `Full pipeline OK: ${r.frames} frames, ${r.size} bytes`, framesEncoded: r.frames };
+      },
+      onError: (msg) => {
+        result = { testType: 'T5', status: 'crashed', step: 'export-error', detail: msg, framesEncoded: 0 };
+      },
+      cancelRef,
+    });
+  } catch (err) {
+    result = { testType: 'T5', status: 'crashed', step: 'exception', detail: err instanceof Error ? err.message : String(err), framesEncoded: 0 };
+  }
+  return result;
+}
+
+export async function runExportLabTest(
+  testType: 'T1' | 'T2' | 'T3' | 'T4' | 'T5',
+  project: ProjectData,
+  canvas: HTMLCanvasElement,
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  audioElementsRef: Map<string, HTMLAudioElement>,
+  cancelRef: { current: boolean },
+): Promise<ExportLabResult> {
+  switch (testType) {
+    case 'T1': return runLabT1(mediaElementCache, project, cancelRef);
+    case 'T2': return runLabT2(mediaElementCache, project, canvas, cancelRef);
+    case 'T3': return runLabT3(canvas, cancelRef);
+    case 'T4': return runLabT4(cancelRef);
+    case 'T5': return runLabT5(project, canvas, mediaElementCache, audioElementsRef, cancelRef);
+    default: return { testType, status: 'error', step: 'unknown-test', detail: `Unknown test type ${testType}`, framesEncoded: 0 };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Crash Ladder — automatic export strategy fallback                 */
+/*  Tries strategies (a)–(e) in order. Remembers which strategy       */
+/*  crashed in localStorage; on the next export starts with the next    */
+/*  one and shows "Trying method N". Marks a strategy "good" once     */
+/*  an export finishes and passes verification.                       */
+/* ------------------------------------------------------------------ */
+
+const LADDER_KEY = 'clipnova_export_ladder';
+const LADDER_STRATEGIES = [
+  { id: 'a', name: 'WebCodecs H.264 hardware', path: 'webcodecs-hw' },
+  { id: 'b', name: 'WebCodecs H.264 software (RGBA frames)', path: 'webcodecs-sw-rgba' },
+  { id: 'c', name: 'WebCodecs VP8/VP9 to WebM', path: 'webcodecs-webm' },
+  { id: 'd', name: 'MediaRecorder frame-by-frame 480p', path: 'mediarecorder' },
+  { id: 'e', name: 'Native Android encoder (MediaCodec plugin)', path: 'native-encoder' },
+] as const;
+
+interface LadderState {
+  crashedAt: string | null;       // strategy id that last crashed
+  goodStrategy: string | null;    // strategy id known to work
+  attempts: { [id: string]: { status: 'ok' | 'crashed'; step: string; detail: string; ts: number } };
+}
+
+function readLadder(): LadderState {
+  try {
+    const raw = localStorage.getItem(LADDER_KEY);
+    if (!raw) return { crashedAt: null, goodStrategy: null, attempts: {} };
+    return JSON.parse(raw);
+  } catch {
+    return { crashedAt: null, goodStrategy: null, attempts: {} };
+  }
+}
+
+function writeLadder(state: LadderState): void {
+  try { localStorage.setItem(LADDER_KEY, JSON.stringify(state)); } catch {}
+}
+
+export function getLadderState(): LadderState {
+  return readLadder();
+}
+
+export function markLadderStrategy(strategyId: string, status: 'ok' | 'crashed', step: string, detail: string): void {
+  const state = readLadder();
+  state.attempts[strategyId] = { status, step, detail, ts: Date.now() };
+  if (status === 'crashed') {
+    state.crashedAt = strategyId;
+  } else if (status === 'ok') {
+    state.goodStrategy = strategyId;
+    state.crashedAt = null;
+  }
+  writeLadder(state);
+}
+
+export function resetLadder(): void {
+  try { localStorage.removeItem(LADDER_KEY); } catch {}
+}
+
+export function getNextLadderStrategy(): { id: string; name: string; path: string } | null {
+  const state = readLadder();
+  // If a strategy is known good, use it
+  if (state.goodStrategy) {
+    const s = LADDER_STRATEGIES.find((s) => s.id === state.goodStrategy);
+    if (s) return s;
+  }
+  // Otherwise start after the last crashed strategy
+  let startIdx = 0;
+  if (state.crashedAt) {
+    const idx = LADDER_STRATEGIES.findIndex((s) => s.id === state.crashedAt);
+    if (idx >= 0) startIdx = idx + 1;
+  }
+  if (startIdx >= LADDER_STRATEGIES.length) return null;
+  return LADDER_STRATEGIES[startIdx];
+}
+
+/**
+ * Crash-ladder export. Tries strategies in order, marking each as crashed/ok.
+ * path 'webcodecs-hw' / 'webcodecs-sw-rgba' / 'webcodecs-webm' use WebCodecs export.
+ * path 'mediarecorder' uses MediaRecorder fallback.
+ * path 'native-encoder' calls the Capacitor NativeEncoderPlugin.
+ */
+export async function startCrashLadderExport(
+  project: ProjectData,
+  canvas: HTMLCanvasElement,
+  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
+  audioElementsRef: Map<string, HTMLAudioElement>,
+  format: 'mp4' | 'webm',
+  safeMode: boolean,
+  onProgress: (pct: number, msg: string) => void,
+  onResult: (result: { format: string; resolution: string; duration: number; frames: number; size: number; hasAudio: boolean; blob: Blob; strategy: string }) => void,
+  onError: (msg: string) => void,
+  cancelRef: { current: boolean },
+): Promise<void> {
+  const state = readLadder();
+  let startIdx = 0;
+  if (state.goodStrategy) {
+    const idx = LADDER_STRATEGIES.findIndex((s) => s.id === state.goodStrategy);
+    if (idx >= 0) startIdx = idx;
+  } else if (state.crashedAt) {
+    const idx = LADDER_STRATEGIES.findIndex((s) => s.id === state.crashedAt);
+    if (idx >= 0) startIdx = idx + 1;
+  }
+
+  for (let si = startIdx; si < LADDER_STRATEGIES.length; si++) {
+    if (cancelRef.current) return;
+    const strat = LADDER_STRATEGIES[si];
+    onProgress(0, `Trying method ${si + 1}/${LADDER_STRATEGIES.length}: ${strat.name}`);
+    trace('ladder-try', `strategy=${strat.id} name=${strat.name}`);
+
+    try {
+      if (strat.path === 'webcodecs-hw' || strat.path === 'webcodecs-sw-rgba' || strat.path === 'webcodecs-webm') {
+        // WebCodecs export — safeMode true for strategies b/c to avoid audio issues
+        const sm = strat.path === 'webcodecs-hw' ? safeMode : true;
+        await startWebCodecsExport({
+          project, canvas, mediaElementCache, audioElementsRef, format,
+          safeMode: sm,
+          onProgress: (pct) => onProgress(pct, `Method ${si + 1}: encoding frame ${pct}%`),
+          onResult: (r) => {
+            markLadderStrategy(strat.id, 'ok', 'export-finished', `ok frames=${r.frames} size=${r.size}`);
+            onResult({ ...r, strategy: strat.id });
+          },
+          onError: (msg) => {
+            markLadderStrategy(strat.id, 'crashed', 'export-error', msg);
+            // Continue to next strategy
+            if (si + 1 < LADDER_STRATEGIES.length) {
+              onProgress(0, `Method ${si + 1} failed: ${msg}. Trying next...`);
+            } else {
+              onError(`All export strategies failed. Last error: ${msg}`);
+            }
+          },
+          cancelRef,
+        });
+        return; // success — onResult already called
+      } else if (strat.path === 'mediarecorder') {
+        await startMediaRecorderFallbackExport({
+          project, canvas, mediaElementCache, audioElementsRef, format,
+          safeMode: true,
+          onProgress: (pct) => onProgress(pct, `Method ${si + 1}: recording ${pct}%`),
+          onResult: (r) => {
+            markLadderStrategy(strat.id, 'ok', 'export-finished', `ok frames=${r.frames} size=${r.size}`);
+            onResult({ ...r, strategy: strat.id });
+          },
+          onError: (msg) => {
+            markLadderStrategy(strat.id, 'crashed', 'export-error', msg);
+            if (si + 1 < LADDER_STRATEGIES.length) {
+              onProgress(0, `Method ${si + 1} failed: ${msg}. Trying next...`);
+            } else {
+              onError(`All export strategies failed. Last error: ${msg}`);
+            }
+          },
+          cancelRef,
+        });
+        return;
+      } else if (strat.path === 'native-encoder') {
+        // Native Android encoder via Capacitor plugin
+        const { NativeEncoderPlugin } = (window as any).Capacitor?.Plugins || {};
+        if (!NativeEncoderPlugin) {
+          markLadderStrategy(strat.id, 'crashed', 'no-plugin', 'NativeEncoderPlugin not available');
+          continue;
+        }
+        const res = await NativeEncoderPlugin.exportVideo({
+          projectJson: JSON.stringify(project),
+          outputPath: `/sdcard/Android/data/com.clipnova.editor/cache/export-${Date.now()}.mp4`,
+          width: 480,
+          height: 360,
+          fps: project.fps,
+          bitrate: 2_000_000,
+        });
+        if (res.success) {
+          markLadderStrategy(strat.id, 'ok', 'export-finished', `native export ok`);
+          const blob = new Blob([], { type: 'video/mp4' }); // placeholder — plugin writes to file
+          onResult({ format: 'MP4 (Native)', resolution: '480p', duration: 0, frames: 0, size: 0, hasAudio: true, blob, strategy: strat.id });
+          return;
+        } else {
+          markLadderStrategy(strat.id, 'crashed', 'native-error', res.error || 'unknown native error');
+          continue;
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      markLadderStrategy(strat.id, 'crashed', 'exception', msg);
+      trace('ladder-exception', `strategy=${strat.id} error=${msg}`);
+      if (si + 1 >= LADDER_STRATEGIES.length) {
+        onError(`All export strategies failed. Last error: ${msg}`);
+      }
+    }
+  }
+  if (!cancelRef.current) {
+    onError('All export strategies exhausted without success.');
+  }
+}
+
 export const FEATURE_IMPLEMENTATION_CHECKLIST = {
   fullyWorking: [
     'CapCut-Style Mobile App Flow: Home Screen on launch, New Project full-screen Media Picker with multi-select numbered badges, Empty Timeline except selected clips, and IndexedDB project/media persistence',

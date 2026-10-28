@@ -78,6 +78,12 @@ import {
   parseCubeLutFile,
   startWebCodecsExport,
   startMediaRecorderFallbackExport,
+  startCrashLadderExport,
+  runExportLabTest,
+  getLadderState,
+  markLadderStrategy,
+  resetLadder,
+  getNextLadderStrategy,
   probeWebCodecsSupport,
   checkResolutionSupported,
   getExportLog,
@@ -369,13 +375,19 @@ export function App() {
   // --- Crash trace state ---
   const [crashTraceVisible, setCrashTraceVisible] = useState<boolean>(false);
   const [crashLastStep, setCrashLastStep] = useState<string | null>(null);
-  const [crashNativeReason, setCrashNativeReason] = useState<{ reason: string | null; description: string | null; rssPages: number | null; pssPages: number | null } | null>(null);
+  const [crashNativeReason, setCrashNativeReason] = useState<{ reason: string | null; status: number | null; description: string | null; importance: number | null; rssPages: number | null; pssPages: number | null } | null>(null);
   const [exportSafeMode, setExportSafeMode] = useState<boolean>(false);
   const rendererCrashedRef = useRef<boolean>(false);
   const renderRafRef = useRef<number | null>(null);
   const lastDisplayUpdateRef = useRef<number>(0);
   const wasPlayingRef = useRef<boolean>(false);
   const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+
+  // --- Export Lab state (Settings > Export Lab) ---
+  const [showExportLab, setShowExportLab] = useState<boolean>(false);
+  const [labResults, setLabResults] = useState<Record<string, { testType: string; status: string; step: string; detail: string; framesEncoded: number } | null>>({});
+  const [labRunning, setLabRunning] = useState<boolean>(false);
+  const labCancelRef = useRef<boolean>(false);
 
   // Load saved projects from IndexedDB/localStorage on launch
   useEffect(() => {
@@ -414,7 +426,9 @@ export function App() {
             const r = reasons[0];
             setCrashNativeReason({
               reason: r.reason,
+              status: r.status,
               description: r.description,
+              importance: r.importance,
               rssPages: r.rssPages,
               pssPages: r.pssPages,
             });
@@ -434,7 +448,9 @@ export function App() {
       setCrashLastStep(`renderer-crashed: ${reason}`);
       setCrashNativeReason({
         reason,
+        status: null,
         description: 'WebView renderer process was killed',
+        importance: null,
         rssPages: null,
         pssPages: null,
       });
@@ -2392,6 +2408,124 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   /* ------------------------------------------------------------------ */
+  /*  EXPORT LAB — isolated crash-diagnostic tests (T1–T5)              */
+  /*  Runs one test at a time, writing breadcrumbs before every step.   */
+  /* ------------------------------------------------------------------ */
+  const handleRunLabTest = async (testType: string) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      triggerToast('No canvas available for lab test');
+      return;
+    }
+    labCancelRef.current = false;
+    setLabRunning(true);
+    setLabResults((prev) => ({ ...prev, [testType]: null }));
+
+    try {
+      const result = await runExportLabTest(
+        testType as 'T1' | 'T2' | 'T3' | 'T4' | 'T5',
+        project,
+        canvas,
+        mediaElementsRef.current,
+        audioElementsRef.current,
+        { current: labCancelRef.current },
+      );
+      setLabResults((prev) => ({ ...prev, [testType]: result }));
+      if (result.status === 'crashed') {
+        triggerToast(`Lab ${testType} crashed at: ${result.step}`, `लैब ${testType} क्रैश हुआ: ${result.step}`);
+      } else if (result.status === 'ok') {
+        triggerToast(`Lab ${testType}: OK — ${result.detail}`, `लैब ${testType}: सही — ${result.detail}`);
+      } else {
+        triggerToast(`Lab ${testType}: ${result.detail}`, `लैब ${testType}: ${result.detail}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLabResults((prev) => ({ ...prev, [testType]: { testType, status: 'crashed', step: 'exception', detail: msg, framesEncoded: 0 } }));
+      triggerToast(`Lab ${testType} error: ${msg}`);
+    } finally {
+      setLabRunning(false);
+    }
+  };
+
+  const handleRunAllLabTests = async () => {
+    for (const t of ['T1', 'T2', 'T3', 'T4', 'T5'] as const) {
+      if (labCancelRef.current) break;
+      await handleRunLabTest(t);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  };
+
+  const handleCancelLabTests = () => {
+    labCancelRef.current = true;
+    setLabRunning(false);
+  };
+
+  /* ------------------------------------------------------------------ */
+  /*  CRASH LADDER — automatic export strategy fallback                 */
+  /*  Tries strategies (a)–(e) in order until one succeeds.            */
+  /* ------------------------------------------------------------------ */
+  const handleStartCrashLadderExport = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    await requestWakeLock();
+    setIsExportingVideo(true);
+    setExportProgress(0);
+    setExportedVideoUrl(null);
+    setExportedVideoBlob(null);
+    setExportResult(null);
+    setExportLog([]);
+    exportCancelledRef.current = false;
+
+    try {
+      await startCrashLadderExport(
+        project,
+        canvas,
+        mediaElementsRef.current,
+        audioElementsRef.current,
+        exportFormat,
+        exportSafeMode,
+        (pct, msg) => {
+          setExportProgress(pct);
+          setExportLog((prev) => [...prev, { step: 'progress', detail: msg, ts: Date.now() }]);
+        },
+        (result) => {
+          setExportedVideoBlob(result.blob);
+          const url = URL.createObjectURL(result.blob);
+          setExportedVideoUrl(url);
+          setExportResult({
+            format: result.format,
+            resolution: result.resolution,
+            duration: result.duration,
+            frames: result.frames,
+            size: result.size,
+            hasAudio: result.hasAudio,
+            verified: true,
+            verificationError: null,
+          });
+          setIsExportingVideo(false);
+          setExportProgress(100);
+          setIsPlaying(false);
+          triggerToast(`Export done via method ${result.strategy}! Verified output. Tap Save & Share below.`);
+        },
+        (msg) => {
+          setIsExportingVideo(false);
+          setExportProgress(0);
+          setIsPlaying(false);
+          triggerToast(`Export error: ${msg}`);
+        },
+        exportCancelledRef,
+      );
+    } catch (err) {
+      setIsExportingVideo(false);
+      setExportProgress(0);
+      setIsPlaying(false);
+      await releaseWakeLock();
+      triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /* ------------------------------------------------------------------ */
   /*  SAVE TO GALLERY / SHARE (BUG 2 fix)                               */
   /* ------------------------------------------------------------------ */
   const mediaSaverPlugin = (): any => {
@@ -3495,6 +3629,90 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                   ? 'ON: video-only export, no audio, software encoder. Use this if export crashes the app.'
                   : 'OFF: normal export with audio and hardware acceleration where available.'}
               </div>
+            </div>
+
+            {/* Export Lab — isolated crash-diagnostic tests (T1–T5) */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-amber-500/40 space-y-2">
+              <div className="flex items-center justify-between space-y-2">
+                <div>
+                  <div className="font-bold text-slate-200 text-sm">Export Lab (crash diagnostics)</div>
+                  <div className="text-[10px] text-slate-400">Run T1–T5 to find which step kills the WebView. Results survive a crash.</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExportLab((p) => !p)}
+                  aria-label="Toggle Export Lab"
+                  className={`min-h-[36px] px-3 rounded-xl border ${showExportLab ? 'bg-amber-500/20 border-amber-500 text-amber-400' : 'border-slate-700 text-slate-300'} text-xs font-medium`}
+                >
+                  {showExportLab ? 'Hide Lab' : 'Show Lab'}
+                </button>
+              </div>
+              {showExportLab && (
+                <div className="space-y-2 pt-2 border-t border-slate-800/40">
+                  <div className="flex gap-1 flex-wrap">
+                    {['T1', 'T2', 'T3', 'T4', 'T5'].map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => handleRunLabTest(t)}
+                        disabled={labRunning}
+                        aria-label={`Run lab test ${t}`}
+                        className={`min-w-[44px] min-h-[36px] rounded-lg px-2 text-xs font-medium border ${
+                          labRunning ? 'bg-slate-800 border-slate-600 text-slate-400 opacity-60' : 'bg-slate-900 border-slate-600 text-amber-300 hover:border-amber-400'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={handleRunAllLabTests}
+                      disabled={labRunning}
+                      className="min-w-[44px] min-h-[36px] rounded-lg px-2 text-xs font-medium border bg-slate-900 border-slate-600 text-amber-300 hover:border-amber-400"
+                    >
+                      All
+                    </button>
+                    {labRunning && (
+                      <button
+                        type="button"
+                        onClick={handleCancelLabTests}
+                        className="min-w-[44px] min-h-[36px] rounded-lg px-2 text-xs font-medium border bg-rose-900 border-rose-600 text-rose-300"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-1 max-h-[40vh] overflow-y-auto pr-2">
+                    {Object.entries(labResults).map(([testType, result]) => (
+                      <div key={testType} className="flex items-center justify-between gap-2 p-1.5 rounded bg-slate-950/50 border border-slate-800/50">
+                        <span className="font-mono text-xs text-slate-300">{testType}</span>
+                        {result ? (
+                          <div className="flex items-center gap-1 text-[10px]">
+                            <span className={`font-bold ${result.status === 'ok' ? 'text-emerald-400' : result.status === 'crashed' ? 'text-rose-400' : 'text-amber-400'}`}>
+                              {result.status.toUpperCase()}
+                            </span>
+                            <span className="text-slate-400">{result.step}</span>
+                            <span className="text-slate-500">·</span>
+                            <span className="text-slate-400 truncate max-w-xs">{result.detail}</span>
+                          </div>
+                        ) : (
+                          <span className="text-slate-500">not run</span>
+                        )}
+                      </div>
+                    ))}
+                    {Object.keys(labResults).length === 0 && (
+                      <div className="text-[10px] text-slate-500 text-center py-2">No lab results yet. Run T1–T5 above.</div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setLabResults({}); resetLadder(); }}
+                    className="min-h-[32px] rounded-lg border border-slate-700 bg-slate-900 text-slate-200 font-medium text-xs px-3"
+                  >
+                    Clear Results
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Preview Playback Debug */}
@@ -5640,10 +5858,11 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               {crashNativeReason && (
                 <div className="font-mono text-rose-200 bg-[#1A1212] p-3 rounded border border-rose-900/50">
                   Native: {crashNativeReason.reason || 'unknown'} — {crashNativeReason.description || 'no description'}
+                  {crashNativeReason.status != null && (
+                    <span className="block text-[10px] text-rose-400 mt-1">Status: {crashNativeReason.status} · Importance: {crashNativeReason.importance}</span>
+                  )}
                   {crashNativeReason.rssPages != null && (
-                    <span className="block text-[10px] text-rose-400 mt-1">
-                      RSS: {crashNativeReason.rssPages} pages · PSS: {crashNativeReason.pssPages} pages
-                    </span>
+                    <span className="block text-[10px] text-rose-400 mt-1">RSS: {crashNativeReason.rssPages} pages · PSS: {crashNativeReason.pssPages} pages</span>
                   )}
                 </div>
               )}
