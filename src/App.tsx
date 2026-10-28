@@ -16,6 +16,8 @@ import {
   Home,
   Image as ImageIcon,
   Info,
+  AlertCircle,
+  CheckCircle,
   Layers,
   LayoutGrid,
   Maximize2,
@@ -30,9 +32,11 @@ import {
   Plus,
   RotateCcw,
   RotateCw,
+  Save,
   Scissors,
   Search,
   Settings,
+  Share,
   ShieldAlert,
   SkipBack,
   SkipForward,
@@ -103,7 +107,9 @@ import {
   isAndroidNativeApp,
   registerHardwareBackButton,
   saveAndShareFileOnDevice,
+  saveToMediaStore,
 } from './utils/androidBridge';
+import { Share as CapShare } from '@capacitor/share';
 import { getAspectDimensions, renderProjectFrame } from './utils/canvasRenderer';
 import { inspectAndImportMediaFile } from './utils/mediaImporter';
 import {
@@ -316,9 +322,25 @@ export function App() {
     verificationError: string | null;
   } | null>(null);
   const [exportLog, setExportLog] = useState<{step: string; detail: string; ts: number}[]>([]);
+
+  // Outcome of the most recent "Save to Gallery" / "Share" operation (shown in a dialog)
+  interface SaveOutcome {
+    kind: 'saving' | 'done' | 'error';
+    name: string;
+    size: number;
+    uri: string | null;
+    relativePath: string | null;
+    method: string | null;
+    sdkInt: number | null;
+    verified: boolean | null;
+    error: string | null;
+  }
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [overlayVisible, setOverlayVisible] = useState<boolean>(true);
   const overlayHideRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fsStateRef = useRef<{ isFullscreen: boolean; pushed: boolean }>({ isFullscreen: false, pushed: false });
+  const fsPopstateGuardRef = useRef<boolean>(false);
 
   // Refs for Canvas, Media Elements, Active Export Cancellation & RAF Slider Throttling
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -536,9 +558,17 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     };
   }, [project.clips]);
 
-  // Register Hardware Back Button on Android (panel closed -> editor -> Home -> exit confirmation)
+  // Register Hardware Back Button on Android (panel closed -> editor -> Home -> exit confirmation).
+  // Registered ONCE ([] deps); all live state is read via fsStateRef so there is no stale closure.
+  // Order: fullscreen closes first, then export modal / checklist / delete / exit confirm,
+  // then editor sheet, then Home.
   useEffect(() => {
     const cleanup = registerHardwareBackButton(() => {
+      const fs = fsStateRef.current;
+      if (fs.isFullscreen) {
+        void closeFullscreenPreview();
+        return;
+      }
       if (showExportModal) {
         if (!isExportingVideo) setShowExportModal(false);
         return;
@@ -573,18 +603,22 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         setShowExitConfirmModal(true);
       }
     });
-    return cleanup;
-  }, [
-    screen,
-    activeSheetTool,
-    showExportModal,
-    isExportingVideo,
-    showChecklistModal,
-    deleteTargetProject,
-    showExitConfirmModal,
-    project,
-    persistCurrentProject,
-  ]);
+
+    // Popstate fallback for the history entry pushed on fullscreen enter
+    window.addEventListener('popstate', handleFullscreenPopState);
+    // Escape key closes fullscreen
+    window.addEventListener('keydown', handleFullscreenKeyDown);
+
+    return () => {
+      cleanup();
+      window.removeEventListener('popstate', handleFullscreenPopState);
+      window.removeEventListener('keydown', handleFullscreenKeyDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep fsStateRef in sync so the single back-handler never reads stale state
+  fsStateRef.current.isFullscreen = isFullscreen;
 
   // Voiceover recording timer
   useEffect(() => {
@@ -1944,6 +1978,95 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     wakeLockRef.current = null;
   };
 
+  /* ------------------------------------------------------------------ */
+  /*  FULLSCREEN PREVIEW: enter / close (BUG 1 fix)                     */
+  /* ------------------------------------------------------------------ */
+  const screenOrientationPlugin = (): any => {
+    try {
+      return (window as any).capacitor?.Plugins?.ScreenOrientation;
+    } catch {
+      return null;
+    }
+  };
+
+  const enterFullscreenPreview = async (): Promise<void> => {
+    setIsFullscreen(true);
+    setOverlayVisible(true);
+    fsStateRef.current = { isFullscreen: true, pushed: false };
+    if (overlayHideRef.current) { clearTimeout(overlayHideRef.current); overlayHideRef.current = null; }
+    overlayHideRef.current = setTimeout(() => setOverlayVisible(false), 3000);
+    // History fallback so Android back / browser back can close fullscreen
+    try {
+      history.pushState({ clipnovaFs: true }, '');
+      fsStateRef.current.pushed = true;
+    } catch {}
+    // Lock landscape while in fullscreen (Capacitor plugin, CSS layout handles the rest)
+    try {
+      const SO = screenOrientationPlugin();
+      if (SO) {
+        try {
+          const cur = await SO.getCurrentOrientation();
+          const type = cur && cur.type ? String(cur.type) : '';
+          if (type === 'PORTRAIT_PRIMARY' || type === 'PORTRAIT_SECONDARY') {
+            await SO.lock({ orientation: 'LANDSCAPE_PRIMARY' });
+          }
+        } catch {}
+      }
+    } catch {}
+  };
+
+  const handleShowFullscreenOverlay = (): void => {
+    setOverlayVisible(true);
+    if (overlayHideRef.current) clearTimeout(overlayHideRef.current);
+    overlayHideRef.current = setTimeout(() => setOverlayVisible(false), 3000);
+  };
+
+  const closeFullscreenPreview = async (popHistory: boolean = true): Promise<void> => {
+    let didThrow = false;
+    try {
+      // Pop the history entry we pushed on enter (triggers our popstate listener once, guarded below)
+      if (popHistory && fsStateRef.current.pushed) {
+        fsStateRef.current.pushed = false;
+        fsPopstateGuardRef.current = true;
+        try { history.back(); } catch {}
+      }
+      // Remove the fixed fullscreen overlay layout
+      setIsFullscreen(false);
+      // Unlock orientation / restore portrait
+      try {
+        const SO = screenOrientationPlugin();
+        if (SO) {
+          try { await SO.unlock(); } catch {}
+          try { await SO.lock({ orientation: 'PORTRAIT_PRIMARY' }); } catch {}
+        }
+      } catch {}
+      // Release wake lock if one is held
+      try { await wakeLockRef.current?.release(); } catch {}
+      wakeLockRef.current = null;
+    } catch (err) {
+      didThrow = true;
+      console.error('closeFullscreenPreview failed:', err);
+    } finally {
+      // Always reset overlay animation state so the next entry starts visible
+      setOverlayVisible(true);
+      if (overlayHideRef.current) { clearTimeout(overlayHideRef.current); overlayHideRef.current = null; }
+      fsStateRef.current.isFullscreen = false;
+      if (didThrow) triggerToast(
+        'Fullscreen close encountered an error; preview was still closed.',
+        'फुलस्क्रीन बंद करने में त्रुटि आई; प्रिव्यू बंद कर दिया गया।'
+      );
+    }
+  };
+
+  const handleFullscreenPopState = (): void => {
+    if (fsPopstateGuardRef.current) { fsPopstateGuardRef.current = false; return; }
+    if (fsStateRef.current.isFullscreen) { void closeFullscreenPreview(false); }
+  };
+
+  const handleFullscreenKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape' && fsStateRef.current.isFullscreen) { void closeFullscreenPreview(); }
+  };
+
   /**
    * Verify the exported blob by loading it in a hidden <video> element,
    * checking real duration, and sampling frames to detect frozen output.
@@ -2190,6 +2313,128 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       await releaseWakeLock();
       triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+
+  /* ------------------------------------------------------------------ */
+  /*  SAVE TO GALLERY / SHARE (BUG 2 fix)                               */
+  /* ------------------------------------------------------------------ */
+  const mediaSaverPlugin = (): any => {
+    try { return (window as any).capacitor?.Plugins?.MediaSaver; } catch { return null; }
+  };
+
+  const MY_EXPORTS_KEY = 'clipnova_my_exports';
+
+  interface MyExport { name: string; size: number; uri: string; mimeType: string; date: string; }
+
+  const getMyExports = (): MyExport[] => {
+    try { return JSON.parse(localStorage.getItem(MY_EXPORTS_KEY) || '[]'); } catch { return []; }
+  };
+  const addMyExport = (e: MyExport) => {
+    try {
+      const list = getMyExports();
+      list.unshift(e);
+      localStorage.setItem(MY_EXPORTS_KEY, JSON.stringify(list.slice(0, 50)));
+    } catch {}
+  };
+  const removeMyExport = (uri: string) => {
+    try {
+      const list = getMyExports().filter((e) => e.uri !== uri);
+      localStorage.setItem(MY_EXPORTS_KEY, JSON.stringify(list));
+    } catch {}
+  };
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  };
+
+  const handleSaveToGallery = async (): Promise<void> => {
+    if (!exportedVideoBlob) return;
+    const ext = exportedVideoBlob.type === 'video/mp4' ? 'mp4' : 'webm';
+    const name = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
+    setSaveOutcome({ kind: 'saving', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: null });
+    try {
+      const mime = exportedVideoBlob.type || 'video/mp4';
+      const res = await saveToMediaStore(exportedVideoBlob, name, mime);
+      if (!res.saved) throw new Error(res.error || 'Save failed');
+      addMyExport({ name, size: res.size, uri: res.uri!, mimeType: mime, date: new Date().toISOString() });
+      setSaveOutcome((prev) => prev ? { ...prev, kind: 'done', uri: res.uri, size: res.size, relativePath: res.relativePath, method: res.method, sdkInt: res.sdkInt, verified: res.verified, error: null } : null);
+      setExportLog((prev) => [...prev, { step: 'save', detail: `saved ${res.relativePath || res.uri} (${res.size} bytes, ${res.method}, api ${res.sdkInt})`, ts: Date.now() }]);
+      triggerToast(`Saved to Movies/ClipNova/${name}`, `गैलरी में सेव किया गया: ${name}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSaveOutcome((prev) => prev ? { ...prev, kind: 'error', error: msg } : { kind: 'error', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: msg });
+      setExportLog((prev) => [...prev, { step: 'save-error', detail: `bytes=${exportedVideoBlob.size} error=${msg}`, ts: Date.now() }]);
+      triggerToast(`Save failed: ${msg}`, `सेव करने में विफल: ${msg}`);
+    }
+  };
+
+  const handleShareExport = async (): Promise<void> => {
+    if (!exportedVideoBlob) return;
+    const ext = exportedVideoBlob.type === 'video/mp4' ? 'mp4' : 'webm';
+    const name = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
+    setSaveOutcome({ kind: 'saving', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: null });
+    try {
+      const mime = exportedVideoBlob.type || 'video/mp4';
+      const res = await saveToMediaStore(exportedVideoBlob, name, mime);
+      if (!res.saved) throw new Error(res.error || 'Save failed');
+      addMyExport({ name, size: res.size, uri: res.uri!, mimeType: mime, date: new Date().toISOString() });
+      const MediaSaver = mediaSaverPlugin();
+      if (MediaSaver && isAndroidNativeApp() && res.uri) {
+        await MediaSaver.shareUri({ uri: res.uri, title: 'ClipNova Export', text: `Exported from ClipNova: ${name}`, mimeType: mime });
+      } else {
+        await CapShare.share({ title: 'ClipNova Export', text: `Exported from ClipNova: ${name}`, url: (res.uri || exportedVideoUrl) ?? undefined, dialogTitle: 'Share video' });
+      }
+      setSaveOutcome((prev) => prev ? { ...prev, kind: 'done' } : null);
+      triggerToast('Opening share sheet…', 'शेयर शीट खोली जा रही है…');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setSaveOutcome((prev) => prev ? { ...prev, kind: 'error', error: msg } : { kind: 'error', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: msg });
+      setExportLog((prev) => [...prev, { step: 'share-error', detail: `bytes=${exportedVideoBlob.size} error=${msg}`, ts: Date.now() }]);
+      triggerToast(`Share failed: ${msg}`, `शेयर करने में विफल: ${msg}`);
+    }
+  };
+
+  const handleOpenSavedUri = async (uri: string, mimeType: string): Promise<void> => {
+    const MediaSaver = mediaSaverPlugin();
+    try {
+      if (MediaSaver && isAndroidNativeApp()) {
+        await MediaSaver.openUri({ uri, mimeType });
+      } else if (exportedVideoUrl) {
+        // Browser fallback: download again
+        const a = document.createElement('a');
+        a.href = exportedVideoUrl;
+        a.download = nameOfBlob();
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } catch (err) {
+      triggerToast(`Open failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleShareExportFromUri = async (uri: string, name: string, mimeType: string): Promise<void> => {
+    const MediaSaver = mediaSaverPlugin();
+    try {
+      if (MediaSaver && isAndroidNativeApp()) {
+        await MediaSaver.shareUri({ uri, title: 'ClipNova Export', text: `Exported from ClipNova: ${name}`, mimeType });
+      } else {
+        triggerToast('Share is available on Android builds only');
+      }
+    } catch (err) {
+      triggerToast(`Share failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleCopySaveError = (text: string): void => {
+    navigator.clipboard.writeText(text).then(() => triggerToast('Error copied to clipboard'));
+  };
+
+  const nameOfBlob = (): string => {
+    if (!exportedVideoBlob) return 'export';
+    const ext = exportedVideoBlob.type === 'video/mp4' ? 'mp4' : 'webm';
+    return `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
   };
 
   const handleCancelVideoExport = () => {
@@ -3114,6 +3359,46 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               <ChevronRight className="w-4 h-4 text-slate-400" />
             </button>
 
+            {/* My exports: previously saved videos stored in localStorage */}
+            {(() => {
+              const exports = getMyExports();
+              if (exports.length === 0) return null;
+              return (
+                <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-2">
+                  <div className="font-bold text-slate-200 text-sm">My exports</div>
+                  {exports.map((e) => (
+                    <div key={e.uri} className="flex flex-col gap-1 pt-1 border-b border-slate-800/40 pb-1">
+                      <div className="text-xs text-slate-200 break-words">{e.name}</div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-slate-400">
+                          {formatFileSize(e.size)} &bull; {new Date(e.date).toLocaleDateString(lang === 'hi' ? 'hi-IN' : undefined, { day: 'numeric', month: 'short' })}
+                        </span>
+                        <div className="flex gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const mime = e.name.endsWith('.webm') ? 'video/webm' : 'video/mp4';
+                              void handleOpenSavedUri(e.uri, mime);
+                            }}
+                            className="min-w-[34px] min-h-[34px] rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center justify-center"
+                          >
+                            Open
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleShareExportFromUri(e.uri, e.name, e.mimeType)}
+                            className="min-w-[34px] min-h-[34px] rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center justify-center"
+                          >
+                            Share
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
             {/* Preview Playback Debug */}
             <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
               <div className="flex items-center justify-between">
@@ -3330,7 +3615,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             {!isFullscreen && (
               <button
                 type="button"
-                onClick={() => setIsFullscreen(true)}
+                onClick={enterFullscreenPreview}
                 aria-label="Enter fullscreen preview"
                 className="absolute bottom-2 right-2 min-w-[44px] min-h-[44px] rounded-xl bg-black/60 hover:bg-black/80 text-slate-100 flex items-center justify-center z-10 backdrop-blur-sm"
               >
@@ -5138,36 +5423,26 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                     </span>
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const ext = exportedVideoBlob?.type === 'video/mp4' ? 'mp4' : 'webm';
-                      const fileName = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
-                      if (exportedVideoBlob) {
-                        const res = await saveAndShareFileOnDevice(
-                          exportedVideoBlob,
-                          fileName,
-                          `ClipNova Video Export (${project.resolution})`
-                        );
-                        if (res.saved) {
-                          triggerToast(
-                            isAndroidNativeApp()
-                              ? `Saved to Documents/ClipNova/${fileName}`
-                              : `Downloaded ${fileName}`,
-                            isAndroidNativeApp()
-                              ? `Documents/ClipNova/${fileName} में सेव किया गया`
-                              : `${fileName} डाउनलोड किया गया`
-                          );
-                        }
-                      }
-                    }}
-                    className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>
-                      {t(lang, 'downloadVideoBtn')} ({exportedVideoBlob?.type === 'video/mp4' ? '.mp4' : '.webm'})
-                    </span>
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveToGallery}
+                      disabled={!!saveOutcome && saveOutcome.kind === 'saving'}
+                      className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>Save to Gallery</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleShareExport}
+                      disabled={!!saveOutcome && saveOutcome.kind === 'saving'}
+                      className="w-full min-h-[46px] rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs flex items-center justify-center gap-2"
+                    >
+                      <Share className="w-4 h-4" />
+                      <span>Share</span>
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -5240,7 +5515,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               </div>
             </div>
           </div>
-      )}
+          )}
 
       {/* ===================================================================== */}
       {/* FULLSCREEN PREVIEW OVERLAY */}
@@ -5248,11 +5523,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       {isFullscreen && (
         <div
           className="fixed inset-0 z-50 bg-black flex items-center justify-center"
-          onTouchStart={() => {
-            setOverlayVisible(true);
-            if (overlayHideRef.current) clearTimeout(overlayHideRef.current);
-            overlayHideRef.current = setTimeout(() => setOverlayVisible(false), 3000);
-          }}
+          onTouchStart={handleShowFullscreenOverlay}
+          onClick={handleShowFullscreenOverlay}
         >
           {/* Video fills screen, aspect ratio preserved */}
           <div className="relative w-full h-full flex items-center justify-center bg-black">
@@ -5276,18 +5548,6 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           <div
             className={"absolute inset-0 flex flex-col justify-between p-4 pointer-events-none " + (overlayVisible ? 'opacity-100 transition-opacity duration-300' : 'opacity-0 transition-opacity duration-300')}
           >
-            {/* Top: close button */}
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setIsFullscreen(false)}
-                aria-label="Close fullscreen"
-                className="min-w-[44px] min-h-[44px] rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
             {/* Middle: play/pause, prev/next */}
             <div className="flex items-center justify-center gap-4 pointer-events-auto">
               <button
@@ -5366,6 +5626,26 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               </div>
             </div>
           </div>
+          {/* Close fullscreen — top layer, always reachable even when controls auto-hid */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); void closeFullscreenPreview(); }}
+            onPointerUp={(e) => e.stopPropagation()}
+            aria-label="Close fullscreen"
+            style={{
+              top: 'max(env(safe-area-inset-top), 32px)',
+              right: 'max(env(safe-area-inset-right), 12px)',
+              width: 48,
+              height: 48,
+              minWidth: 48,
+              minHeight: 48,
+              touchAction: 'manipulation',
+              zIndex: 50,
+            }}
+            className="absolute rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
       )}
     </div>

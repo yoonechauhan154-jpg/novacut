@@ -226,3 +226,126 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
 
   console.log('FULLSCREEN TEST PASSED - overlay visible, preview fills viewport, playback works, seek bar works');
 });
+
+const enterFullscreenAndVerify = async (page: any) => {
+  // Poll for the fullscreen button — it appears once the preview is ready
+  const fsButton = page.locator('button[aria-label="Enter fullscreen preview"]').first();
+  await expect(fsButton).toBeVisible({ timeout: 15000 });
+  await fsButton.click();
+  await page.waitForTimeout(1500);
+  const fsOverlay = page.locator('.fixed.inset-0.z-50.bg-black').first();
+  await expect(fsOverlay).toBeVisible({ timeout: 5000 });
+  return fsOverlay;
+};
+
+test('FULLSCREEN: close with X while overlay visible restores editor + playhead/clip unchanged', async ({ page }) => {
+  await page.addInitScript(PROBE_SCRIPT);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('text=ClipNova')).toBeVisible({ timeout: 15000 });
+  await completeOnboarding(page);
+  await page.evaluate((url) => { (window as any).__TEST_VIDEO_URL__ = url; }, TEST_VIDEO_URL);
+  const loadBtn = page.locator('button:has-text("Load test video")').first();
+  await expect(loadBtn).toBeVisible({ timeout: 5000 });
+  await loadBtn.click();
+  await page.waitForTimeout(5000);
+
+  const before = await page.evaluate(() => (window as any).__debug || {});
+
+  const fsOverlay = await enterFullscreenAndVerify(page);
+  const closeBtn = fsOverlay.locator('button[aria-label="Close fullscreen"]').first();
+  await expect(closeBtn).toBeVisible({ timeout: 5000 });
+  await closeBtn.click();
+  await page.waitForTimeout(500);
+
+  // Overlay gone → back in editor
+  await expect(page.locator('.fixed.inset-0.z-50.bg-black')).toHaveCount(0);
+  await expect(page.locator('header')).toBeVisible({ timeout: 5000 });
+  // Re-enter button visible again
+  await expect(page.locator('button[aria-label="Enter fullscreen preview"]')).toBeVisible({ timeout: 5000 });
+
+  // Playhead and selected clip unchanged
+  const after = await page.evaluate(() => (window as any).__debug || {});
+  expect(Math.abs((after.playheadTime || 0) - (before.playheadTime || 0))).toBeLessThan(1);
+  expect(after.activeClipId).toBe(before.activeClipId);
+  console.log('FULLSCREEN X-CLOSE TEST PASSED');
+});
+
+test('FULLSCREEN: tap once to show overlay after auto-hide, then close with X', async ({ page }) => {
+  await page.addInitScript(PROBE_SCRIPT);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('text=ClipNova')).toBeVisible({ timeout: 15000 });
+  await completeOnboarding(page);
+  await page.evaluate((url) => { (window as any).__TEST_VIDEO_URL__ = url; }, TEST_VIDEO_URL);
+  const loadBtn = page.locator('button:has-text("Load test video")').first();
+  await expect(loadBtn).toBeVisible({ timeout: 5000 });
+  await loadBtn.click();
+  await page.waitForTimeout(5000);
+
+  const fsOverlay = await enterFullscreenAndVerify(page);
+
+  // Wait for auto-hide (overlay opacity fades out after 3s)
+  await page.waitForTimeout(3500);
+  const controls = fsOverlay.locator('.absolute.inset-0.flex.flex-col.justify-between.p-4').first();
+  await expect(controls).toHaveCSS('opacity', '0');
+
+  // First tap shows the overlay again (root onTouchStart)
+  await fsOverlay.click({ position: { x: 200, y: 400 } });
+  await page.waitForTimeout(500);
+  await expect(controls).toHaveCSS('opacity', '1');
+
+  // Then close with X while overlay is visible
+  const closeBtn = fsOverlay.locator('button[aria-label="Close fullscreen"]').first();
+  await expect(closeBtn).toBeVisible({ timeout: 5000 });
+  await closeBtn.click();
+  await page.waitForTimeout(500);
+  await expect(page.locator('.fixed.inset-0.z-50.bg-black')).toHaveCount(0);
+  console.log('FULLSCREEN AUTO-HIDE TAP-THEN-CLOSE TEST PASSED');
+});
+
+test('FULLSCREEN: close with popstate / Android back restores editor', async ({ page }) => {
+  await page.addInitScript(PROBE_SCRIPT);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('text=ClipNova')).toBeVisible({ timeout: 15000 });
+  await completeOnboarding(page);
+  await page.evaluate((url) => { (window as any).__TEST_VIDEO_URL__ = url; }, TEST_VIDEO_URL);
+  const loadBtn = page.locator('button:has-text("Load test video")').first();
+  await expect(loadBtn).toBeVisible({ timeout: 5000 });
+  await loadBtn.click();
+  await page.waitForTimeout(5000);
+
+  await enterFullscreenAndVerify(page);
+  await expect(page.locator('.fixed.inset-0.z-50.bg-black')).toHaveCount(1);
+
+  // Simulate Android back button via history.popstate
+  await page.evaluate(() => history.back());
+  await page.waitForTimeout(500);
+
+  await expect(page.locator('.fixed.inset-0.z-50.bg-black')).toHaveCount(0);
+  await expect(page.locator('header')).toBeVisible({ timeout: 5000 });
+  console.log('FULLSCREEN POPSTATE/BACK CLOSE TEST PASSED');
+});
+
+test('FULLSCREEN: landscape 844x390 close with X restores editor', async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.addInitScript(PROBE_SCRIPT);
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('text=ClipNova')).toBeVisible({ timeout: 15000 });
+  await completeOnboarding(page);
+  await page.evaluate((url) => { (window as any).__TEST_VIDEO_URL__ = url; }, TEST_VIDEO_URL);
+  const loadBtn = page.locator('button:has-text("Load test video")').first();
+  await expect(loadBtn).toBeVisible({ timeout: 5000 });
+  await loadBtn.click();
+  await page.waitForTimeout(5000);
+
+  const fsOverlay = await enterFullscreenAndVerify(page);
+  const vp = page.viewportSize();
+  expect(vp).toMatchObject({ width: 844, height: 390 });
+
+  const closeBtn = fsOverlay.locator('button[aria-label="Close fullscreen"]').first();
+  await expect(closeBtn).toBeVisible({ timeout: 5000 });
+  await closeBtn.click();
+  await page.waitForTimeout(500);
+  await expect(page.locator('.fixed.inset-0.z-50.bg-black')).toHaveCount(0);
+  await expect(page.locator('header')).toBeVisible({ timeout: 5000 });
+  console.log('FULLSCREEN LANDSCAPE X-CLOSE TEST PASSED');
+});

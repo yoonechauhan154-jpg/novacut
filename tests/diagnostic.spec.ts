@@ -67,7 +67,7 @@ test('DIAGNOSTIC: check what happens after loading test video', async ({ page })
   console.log('DIAG: Toast elements:', toastCount);
 
   // Screenshot
-  await page.screenshot({ path: '/home/ubuntu/novacut/test-results/diagnostic.png', fullPage: true });
+  await page.screenshot({ path: 'test-results/diagnostic.png', fullPage: true });
 
   console.log('DIAG: Errors:', errors);
   console.log('DIAG: Console messages:', consoleMessages);

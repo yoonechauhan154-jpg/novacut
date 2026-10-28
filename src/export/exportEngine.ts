@@ -769,7 +769,22 @@ export async function startMediaRecorderFallbackExport(opts: {
 
   const startTime = performance.now();
   let frameInterval: ReturnType<typeof setInterval> | null = null;
+  let finishTimeout: ReturnType<typeof setTimeout> | null = null;
   const frameDurationMs = 1000 / fps;
+  // Abort the export when the media element stops seeking (frozen output).
+  // Never silently emit a still photo as a video.
+  let consecutiveStalls = 0;
+  const MAX_STALLS = 3;
+  let exportAborted = false;
+
+  function abortExport(msg: string) {
+    if (exportAborted) return;
+    exportAborted = true;
+    if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
+    if (finishTimeout) { clearTimeout(finishTimeout); finishTimeout = null; }
+    try { if (recorder.state !== 'inactive') recorder.stop(); } catch {}
+    onError(msg);
+  }
 
   async function drawNextFrame() {
     if (cancelRef.current) {
@@ -778,7 +793,55 @@ export async function startMediaRecorderFallbackExport(opts: {
       return;
     }
     const t = frameCount / fps;
+
+    // Seek the active video source to this frame's time, exactly like the
+    // WebCodecs path does. renderProjectFrame skips its own re-seek when the
+    // element is already at the target (diff < 0.28).
+    const activeClip = project.clips.find(
+      (c) =>
+        (c.trackType === 'video' || c.trackType === 'overlay') &&
+        c.sourceType === 'uploaded-video' &&
+        c.mediaUrl &&
+        t >= c.startTime &&
+        t <= c.startTime + c.duration
+    );
+    let sourceTime = 0;
+    if (activeClip) {
+      const el = mediaElementCache.get(activeClip.id);
+      if (el instanceof HTMLVideoElement) {
+        sourceTime =
+          (activeClip.sourceStart + (t - activeClip.startTime) * activeClip.speed) %
+          Math.max(0.5, el.duration || activeClip.duration);
+        el.currentTime = Math.max(0, sourceTime);
+      }
+    }
+
     renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
+
+    // Stall detection: if the element is not ready or refused to seek, the
+    // canvas would repeat the same frame — abort before producing a photo.
+    let stalled = false;
+    if (activeClip) {
+      const el = mediaElementCache.get(activeClip.id);
+      if (!(el instanceof HTMLVideoElement) || el.readyState < 2) {
+        stalled = true;
+      } else {
+        const check =
+          (activeClip.sourceStart + (t - activeClip.startTime) * activeClip.speed) %
+          Math.max(0.5, el.duration || activeClip.duration);
+        if (Math.abs(el.currentTime - check) > 0.1) stalled = true;
+      }
+    }
+    if (stalled) {
+      consecutiveStalls++;
+      if (consecutiveStalls > MAX_STALLS) {
+        abortExport('Export failed: video element stalled — frames are not changing');
+        return;
+      }
+    } else {
+      consecutiveStalls = 0;
+    }
+
     frameCount++;
     const pct = Math.round((frameCount / totalFrames) * 100);
     const elapsed = (performance.now() - startTime) / 1000;
@@ -794,9 +857,9 @@ export async function startMediaRecorderFallbackExport(opts: {
     drawNextFrame().catch(() => {});
   }, frameDurationMs);
 
-  setTimeout(() => {
+  finishTimeout = setTimeout(() => {
     if (frameInterval) clearInterval(frameInterval);
-    if (recorder.state !== 'inactive') recorder.stop();
+    if (!exportAborted && recorder.state !== 'inactive') recorder.stop();
   }, totalDuration * 1000 + 2000);
 }
 

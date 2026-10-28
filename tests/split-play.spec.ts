@@ -132,7 +132,7 @@ test('play after split at 2s, after undo, and after two splits', async ({ page }
   );
 
   // Take screenshot
-  await page.screenshot({ path: '/home/ubuntu/novacut/test-results/split-play-after.png', fullPage: true });
+  await page.screenshot({ path: 'test-results/split-play-after.png', fullPage: true });
 
   results.push(`Console errors: ${consoleErrors.length}`);
   results.push(`Playback errors: ${playbackErrors.length}`);
