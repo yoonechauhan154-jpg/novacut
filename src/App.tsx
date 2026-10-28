@@ -109,6 +109,14 @@ import {
   saveAndShareFileOnDevice,
   saveToMediaStore,
 } from './utils/androidBridge';
+import {
+  clearTrace,
+  exportFinished,
+  getNativeExitReasons,
+  getTrace,
+  lastStep,
+  trace,
+} from './utils/crashTrace';
 import { Share as CapShare } from '@capacitor/share';
 import { getAspectDimensions, renderProjectFrame } from './utils/canvasRenderer';
 import { inspectAndImportMediaFile } from './utils/mediaImporter';
@@ -357,6 +365,13 @@ export function App() {
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const sliderRafRef = useRef<number | null>(null);
   const playheadRef = useRef<number>(0);
+
+  // --- Crash trace state ---
+  const [crashTraceVisible, setCrashTraceVisible] = useState<boolean>(false);
+  const [crashLastStep, setCrashLastStep] = useState<string | null>(null);
+  const [crashNativeReason, setCrashNativeReason] = useState<{ reason: string | null; description: string | null; rssPages: number | null; pssPages: number | null } | null>(null);
+  const [exportSafeMode, setExportSafeMode] = useState<boolean>(false);
+  const rendererCrashedRef = useRef<boolean>(false);
   const renderRafRef = useRef<number | null>(null);
   const lastDisplayUpdateRef = useRef<number>(0);
   const wasPlayingRef = useRef<boolean>(false);
@@ -376,6 +391,63 @@ export function App() {
       mounted = false;
     };
   }, [triggerToast]);
+
+  // --- Crash trace visibility ---
+  // On app start: if the last export trace has no "export-finished", show the
+  // red "Last export crashed at" dialog with the last breadcrumb step and
+  // native process exit reason (API 30+).
+  // Also listen for renderer-crash events sent from MainActivity.onRenderProcessGone.
+  useEffect(() => {
+    let mounted = true;
+
+    async function checkCrashOnStart() {
+      if (!exportFinished()) {
+        const steps = getTrace();
+        const last = steps.length > 0 ? steps[steps.length - 1] : null;
+        setCrashLastStep(last ? `${last.step}: ${last.detail}` : 'unknown (no trace)');
+        // Read native process exit reasons
+        try {
+          const reasons = await getNativeExitReasons();
+          if (reasons.length > 0) {
+            const r = reasons[0];
+            setCrashNativeReason({
+              reason: r.reason,
+              description: r.description,
+              rssPages: r.rssPages,
+              pssPages: r.pssPages,
+            });
+          }
+        } catch {}
+        setCrashTraceVisible(true);
+        rendererCrashedRef.current = true;
+        // Auto-enable safe mode for the next export attempt
+        setExportSafeMode(true);
+      }
+    }
+
+    checkCrashOnStart();
+
+    const handleRendererCrashed = (event: CustomEvent) => {
+      const reason = event.detail?.reason || 'unknown';
+      setCrashLastStep(`renderer-crashed: ${reason}`);
+      setCrashNativeReason({
+        reason,
+        description: 'WebView renderer process was killed',
+        rssPages: null,
+        pssPages: null,
+      });
+      setCrashTraceVisible(true);
+      rendererCrashedRef.current = true;
+      setExportSafeMode(true);
+    };
+
+    window.addEventListener('clipnova-renderer-crashed', handleRendererCrashed as unknown as EventListener);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('clipnova-renderer-crashed', handleRendererCrashed as unknown as EventListener);
+    };
+  }, []);
 
   // Calculate total timeline duration
   const totalDuration = Math.max(
@@ -2192,6 +2264,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           mediaElementCache: mediaElementsRef.current,
           audioElementsRef: audioElementsRef.current,
           format: exportFormat,
+          safeMode: exportSafeMode,
           onProgress: (pct) => {
             setExportProgress(pct);
             setExportLog((prev) => [...prev, { step: 'progress', detail: `${pct}%`, ts: Date.now() }]);
@@ -2252,6 +2325,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         mediaElementCache: mediaElementsRef.current,
         audioElementsRef: audioElementsRef.current,
         format: exportFormat,
+        safeMode: exportSafeMode,
         onProgress: (pct, framesDone, totalFrames, estMsLeft) => {
           setExportProgress(pct);
           setExportLog((prev) => [
@@ -3398,6 +3472,28 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                 </div>
               );
             })()}
+
+            {/* Export Safe Mode — video only, no audio, software encoder. Auto-enabled after a crash. */}
+            <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-slate-200 text-sm">Export safe mode</div>
+                <button
+                  type="button"
+                  onClick={() => setExportSafeMode((p) => !p)}
+                  aria-label="Toggle export safe mode"
+                  className={`relative min-w-[44px] min-h-[24px] rounded-full bg-slate-800 ${exportSafeMode ? 'bg-amber-500' : ''} transition-colors duration-200`}
+                >
+                  <span
+                    className={`block w-5 h-5 rounded-full bg-white ${exportSafeMode ? 'translate-x-[18px]' : 'translate-x-2'} shadow-md transition-transform duration-200`}
+                  />
+                </button>
+              </div>
+              <div className="text-[10px] text-slate-400 leading-relaxed">
+                {exportSafeMode
+                  ? 'ON: video-only export, no audio, software encoder. Use this if export crashes the app.'
+                  : 'OFF: normal export with audio and hardware acceleration where available.'}
+              </div>
+            </div>
 
             {/* Preview Playback Debug */}
             <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
@@ -5516,6 +5612,71 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             </div>
           </div>
           )}
+
+      {/* CRASH TRACE DIALOG — shown when the last export crashed */}
+      {crashTraceVisible && (
+        <div className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#2E1A1A] border border-rose-500/50 rounded-2xl p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-rose-800/50 pb-3">
+              <h2 className="text-base font-bold text-rose-300">
+                <AlertCircle className="w-4 h-4 mr-2" /> Last export crashed
+              </h2>
+              <button
+                type="button"
+                onClick={() => setCrashTraceVisible(false)}
+                aria-label="Close crash dialog"
+                className="min-w-[40px] min-h-[40px] rounded-lg hover:bg-rose-800/30 text-rose-400 flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="text-xs text-rose-200 space-y-2">
+              <div className="font-mono text-rose-300 bg-[#1A1212] p-3 rounded border border-rose-900/50">
+                Last step: {crashLastStep || 'unknown'}
+              </div>
+              {crashNativeReason && (
+                <div className="font-mono text-rose-200 bg-[#1A1212] p-3 rounded border border-rose-900/50">
+                  Native: {crashNativeReason.reason || 'unknown'} — {crashNativeReason.description || 'no description'}
+                  {crashNativeReason.rssPages != null && (
+                    <span className="block text-[10px] text-rose-400 mt-1">
+                      RSS: {crashNativeReason.rssPages} pages · PSS: {crashNativeReason.pssPages} pages
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="text-[10px] text-rose-400">
+                Reopen the app and try Export again. “Export safe mode” is now ON (video only, no audio) to avoid another crash.
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(`Last export crashed at: ${crashLastStep || 'unknown'}\nNative: ${crashNativeReason?.reason || 'unknown'} — ${crashNativeReason?.description || 'no description'}`);
+                  triggerToast('Crash trace copied to clipboard');
+                }}
+                className="min-h-[42px] rounded-xl border border-rose-600 bg-rose-900/50 text-rose-300 font-medium text-xs flex items-center justify-center gap-2"
+              >
+                <Copy className="w-3 h-3" /> Copy trace
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearTrace();
+                  setCrashTraceVisible(false);
+                  setCrashLastStep(null);
+                  setCrashNativeReason(null);
+                }}
+                className="min-h-[42px] rounded-xl border border-slate-700 bg-slate-900 text-slate-300 font-medium text-xs flex items-center justify-center gap-2"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===================================================================== */}
       {/* FULLSCREEN PREVIEW OVERLAY */}

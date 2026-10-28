@@ -1,6 +1,7 @@
 import { ProjectData, TimelineClip } from '../types/editor';
 import { renderProjectFrame, getAspectDimensions } from '../utils/canvasRenderer';
 import { saveAndShareFileOnDevice } from '../utils/androidBridge';
+import { trace } from '../utils/crashTrace';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -18,6 +19,8 @@ export interface ExportOptions {
   mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>;
   audioElementsRef: Map<string, HTMLAudioElement>;
   format: 'mp4' | 'webm';
+  /** Safe mode: video only, software encoder, no audio. Used after a crash. */
+  safeMode?: boolean;
   onProgress: (pct: number, framesDone: number, totalFrames: number, estMsLeft: number) => void;
   onResult: (result: {
     format: string;
@@ -50,6 +53,8 @@ function logExport(step: string, detail: string) {
   const entry: ExportLogEntry = { step, detail, ts: Date.now() };
   exportLog.push(entry);
   console.log(`[EXPORT][${step}] ${detail}`);
+  // Breadcrumbs survive a process kill so the next app start can show what happened.
+  trace(step, detail);
 }
 
 export function getExportLog(): ExportLogEntry[] {
@@ -77,8 +82,9 @@ export async function probeWebCodecsSupport(): Promise<WebCodecsSupport> {
     return result;
   }
 
-  // Probe video codecs (prefer AVC/H.264 for hardware acceleration on Android)
+  // Probe video codecs (prefer AVC/H.264 baseline for max Android WebView compatibility)
   const videoCandidates = [
+    'avc1.42001e', // H.264 Baseline L3.0 - up to 1024x768@30, widely supported on Android WebView
     'avc1.42E028', // H.264 Main L3.1 - 720p/1080p@30, widely hardware-accelerated
     'avc1.42E01E', // H.264 Main L3.0
     'avc1.640028', // H.264 High L3.1
@@ -219,6 +225,9 @@ async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
 
 /**
  * Decode audio from a media element's source into an AudioBuffer.
+ * Never reads the whole file blindly: fetch is wrapped in a timeout so a
+ * huge source file cannot hang the WebView forever. On failure, returns null
+ * so the export can continue video-only instead of crashing.
  */
 async function decodeAudioFromElement(
   audioCtx: BaseAudioContext,
@@ -227,10 +236,23 @@ async function decodeAudioFromElement(
   try {
     const src = el.src;
     if (!src) return null;
-    const ab = await fetchArrayBuffer(src);
-    return await audioCtx.decodeAudioData(ab);
+    logExport('audio-fetch', `Fetching audio source: ${src.slice(0, 120)}`);
+    const ab = await Promise.race([
+      fetchArrayBuffer(src),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('audio fetch timeout')), 15000)),
+    ]);
+    logExport('audio-fetch', `Fetched ${ab.byteLength} bytes`);
+    // Guard: refuse to decode more than ~150 MB of source audio (PCM would be ~10x that).
+    if (ab.byteLength > 150 * 1024 * 1024) {
+      logExport('audio-skip', `Source too large (${(ab.byteLength / 1024 / 1024).toFixed(1)} MB), skipping audio`);
+      return null;
+    }
+    return await Promise.race([
+      audioCtx.decodeAudioData(ab),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('audio decode timeout')), 30000)),
+    ]);
   } catch (err) {
-    console.warn('[EXPORT] decodeAudioFromElement failed:', err);
+    logExport('audio-error', err instanceof Error ? err.message : String(err));
     return null;
   }
 }
@@ -356,6 +378,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     mediaElementCache,
     audioElementsRef,
     format,
+    safeMode = false,
     onProgress,
     onResult,
     onError,
@@ -365,9 +388,13 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
   clearExportLog();
   const log = (step: string, detail: string) => logExport(step, detail);
 
+  // Breadcrumbs: mark export start so a crash is visible on next app start.
+  trace('export-started', `format=${format}`);
+
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) {
     onError('Cannot get 2D context on export canvas');
+    trace('export-finished', 'failed:no-context');
     return;
   }
 
@@ -377,6 +404,13 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     'export-full',
     project.resolution
   );
+  // VideoEncoder requires width/height to be multiples of 16 on many Android WebViews.
+  const round16 = (n: number) => Math.max(16, Math.round(n / 16) * 16);
+  const rW = round16(expW);
+  const rH = round16(expH);
+  if (rW !== expW || rH !== expH) {
+    log('resolution-round', `${expW}x${expH} -> ${rW}x${rH} (multiple of 16)`);
+  }
   const fps = project.fps;
   const totalDuration = Math.max(
     3,
@@ -385,7 +419,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
   const totalFrames = Math.ceil(totalDuration * fps);
   const frameDurationMs = 1000 / fps;
 
-  log('init', `Export ${format.toUpperCase()} ${expW}x${expH} @ ${fps}fps, ${totalDuration}s, ${totalFrames} frames`);
+  log('init', `Export ${format.toUpperCase()} ${rW}x${rH} @ ${fps}fps, ${totalDuration}s, ${totalFrames} frames`);
 
   // --- Probe WebCodecs support ---
   const support = await probeWebCodecsSupport();
@@ -396,14 +430,15 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
       `WebCodecs not available on this device: ${support.reason || 'unknown reason'}. ` +
         'MP4 export requires a WebView with WebCodecs support (Chrome 94+/Android 12+).'
     );
+    trace('export-finished', 'failed:no-webcodecs');
     return;
   }
 
   // --- Resolution fallback check ---
-  let actualW = expW;
-  let actualH = expH;
-  const resCheck = await checkResolutionSupported(expW, expH, fps, support.videoCodec);
-  log('resolution', `Requested ${expW}x${expH} supported=${resCheck.supported}`);
+  let actualW = rW;
+  let actualH = rH;
+  const resCheck = await checkResolutionSupported(rW, rH, fps, support.videoCodec);
+  log('resolution', `Requested ${rW}x${rH} supported=${resCheck.supported}`);
   if (!resCheck.supported && resCheck.fallbackWidth) {
     log('resolution-fallback', `Falling back to ${resCheck.fallbackWidth}x${resCheck.fallbackHeight}`);
     actualW = resCheck.fallbackWidth;
@@ -412,12 +447,13 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     canvas.height = actualH;
     log('resolution', `Canvas resized to ${actualW}x${actualH}`);
   } else {
-    canvas.width = expW;
-    canvas.height = expH;
+    canvas.width = actualW;
+    canvas.height = actualH;
   }
 
   // --- Set up VideoEncoder ---
-  const videoBitrate = Math.round(actualW * actualH * 0.12);
+  // ~2 Mbps for 480p, scaling linearly with resolution; floor at 500 kbps.
+  const videoBitrate = Math.max(500_000, Math.round(actualW * actualH * 0.10));
   const videoChunks: EncodedVideoChunk[] = [];
   let videoChunkCount = 0;
 
@@ -432,81 +468,107 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     },
   });
 
-  videoEncoder.configure({
+  const encConfig: any = {
     codec: support.videoCodec,
     width: actualW,
     height: actualH,
     bitrate: videoBitrate,
     framerate: fps,
-  });
-  log('encoder-config', JSON.stringify({ codec: support.videoCodec, width: actualW, height: actualH, bitrate: videoBitrate, framerate: fps }));
+  };
+  // Prefer software encoder first (more stable on old WebViews), then hardware.
+  try {
+    encConfig.hardwareAcceleration = 'prefer-software';
+  } catch {}
+  try {
+    videoEncoder.configure(encConfig);
+    log('encoder-config', JSON.stringify({ codec: support.videoCodec, width: actualW, height: actualH, bitrate: videoBitrate, framerate: fps, hw: 'prefer-software' }));
+  } catch (err) {
+    log('encoder-config-error', err instanceof Error ? err.message : String(err));
+    // Retry without hardwareAcceleration hint
+    try {
+      delete encConfig.hardwareAcceleration;
+      videoEncoder.configure(encConfig);
+      log('encoder-config', JSON.stringify({ codec: support.videoCodec, width: actualW, height: actualH, bitrate: videoBitrate, framerate: fps, hw: 'default' }));
+    } catch (err2) {
+      onError(`VideoEncoder configure failed: ${err2 instanceof Error ? err2.message : String(err2)}`);
+      trace('export-finished', 'failed:encoder-configure');
+      return;
+    }
+  }
 
   // --- Set up AudioEncoder ---
   const audioChunks: EncodedAudioChunk[] = [];
   let audioChunkCount = 0;
   let hasAudio = false;
   let audioCodec = support.audioCodec;
+  let audioEncoder: AudioEncoder | null = null;
 
-  const audioEncoder = new AudioEncoder({
-    output: (chunk, meta) => {
-      audioChunks.push(chunk);
-      audioChunkCount++;
-    },
-    error: (e) => {
-      log('audio-encoder-error', e.message);
-      // Non-fatal: continue without audio
-      hasAudio = false;
-    },
-  });
-
-  audioEncoder.configure({
-    codec: audioCodec!,
-    numberOfChannels: 2,
-    sampleRate: 48000,
-    bitrate: 128_000,
-  });
-  log('audio-encoder-config', JSON.stringify({ codec: audioCodec, channels: 2, sampleRate: 48000, bitrate: 128000 }));
-
-  // --- Render audio offline ---
-  let audioBuffer: AudioBuffer | null = null;
-  try {
-    const audioResult = await renderProjectAudio(
-      project,
-      audioElementsRef,
-      mediaElementCache,
-      log
-    );
-    audioBuffer = audioResult.buffer;
-    hasAudio = audioResult.hasAudio && !!audioBuffer;
-  } catch (err) {
-    log('audio-render-error', err instanceof Error ? err.message : String(err));
-    hasAudio = false;
-  }
-
-  // --- Feed PCM chunks to AudioEncoder ---
-  if (hasAudio && audioBuffer) {
-    const pcmChunks = audioBufferToPcmChunks(audioBuffer, 1024);
-    log('audio-pcm', `Prepared ${pcmChunks.length} PCM chunks for AudioEncoder`);
-    for (const pcm of pcmChunks) {
-      if (cancelRef.current) break;
-      try {
-        const audioData = new AudioData({
-          data: pcm.data.buffer as unknown as ArrayBuffer,
-          format: 's16',
-          numberOfChannels: 2,
-          numberOfFrames: pcm.data.length / 2,
-          sampleRate: 48000,
-          timestamp: pcm.timestampUs,
-        });
-        audioEncoder.encode(audioData);
-        audioData.close();
-      } catch (err) {
-        log('audio-encode-error', err instanceof Error ? err.message : String(err));
+  // Safe mode: skip audio entirely (video only).
+  if (!safeMode) {
+    audioEncoder = new AudioEncoder({
+      output: (chunk, meta) => {
+        audioChunks.push(chunk);
+        audioChunkCount++;
+      },
+      error: (e) => {
+        log('audio-encoder-error', e.message);
+        // Non-fatal: continue without audio
         hasAudio = false;
-        break;
-      }
+      },
+    });
+
+    audioEncoder.configure({
+      codec: audioCodec!,
+      numberOfChannels: 2,
+      sampleRate: 48000,
+      bitrate: 128_000,
+    });
+    log('audio-encoder-config', JSON.stringify({ codec: audioCodec, channels: 2, sampleRate: 48000, bitrate: 128000 }));
+
+    // --- Render audio offline ---
+    let audioBuffer: AudioBuffer | null = null;
+    try {
+      const audioResult = await renderProjectAudio(
+        project,
+        audioElementsRef,
+        mediaElementCache,
+        log
+      );
+      audioBuffer = audioResult.buffer;
+      hasAudio = audioResult.hasAudio && !!audioBuffer;
+    } catch (err) {
+      log('audio-render-error', err instanceof Error ? err.message : String(err));
+      hasAudio = false;
     }
-    await audioEncoder.flush();
+
+    // --- Feed PCM chunks to AudioEncoder ---
+    if (hasAudio && audioBuffer) {
+      const pcmChunks = audioBufferToPcmChunks(audioBuffer, 1024);
+      log('audio-pcm', `Prepared ${pcmChunks.length} PCM chunks for AudioEncoder`);
+      for (const pcm of pcmChunks) {
+        if (cancelRef.current) break;
+        try {
+          const audioData = new AudioData({
+            data: pcm.data.buffer as unknown as ArrayBuffer,
+            format: 's16',
+            numberOfChannels: 2,
+            numberOfFrames: pcm.data.length / 2,
+            sampleRate: 48000,
+            timestamp: pcm.timestampUs,
+          });
+          audioEncoder.encode(audioData);
+          audioData.close();
+        } catch (err) {
+          log('audio-encode-error', err instanceof Error ? err.message : String(err));
+          hasAudio = false;
+          break;
+        }
+      }
+      await audioEncoder.flush();
+      try { audioEncoder.close(); } catch {}
+    }
+  } else {
+    log('audio-skip', 'Safe mode: audio disabled');
   }
 
   // --- Frame-by-frame video rendering ---
@@ -516,6 +578,18 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
   let framesEncoded = 0;
   let seeks = 0;
   let seekFailures = 0;
+  // Flow control: only one frame in flight at a time to bound encoder memory.
+  let frameInFlight = false;
+  function waitForEncoderSlot(): Promise<void> {
+    if (!frameInFlight) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        if (!frameInFlight) resolve();
+        else setTimeout(check, 0);
+      };
+      check();
+    });
+  }
 
   function getClipVideoElement(clip: TimelineClip): HTMLVideoElement | null {
     if (clip.trackType !== 'video' && clip.trackType !== 'overlay') return null;
@@ -567,22 +641,43 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     if (cancelRef.current) return false;
 
     // Brief delay for the browser to decode the seeked frame.
-    // Use setTimeout instead of requestAnimationFrame for reliability in headless mode.
     await new Promise((r) => setTimeout(r, 16));
 
     // Draw the frame to canvas
-    renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
+    try {
+      renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
+    } catch (err) {
+      log('frame-draw-error', err instanceof Error ? err.message : String(err));
+      return false;
+    }
 
-    // Create VideoFrame and encode
-    const videoFrame = new VideoFrame(canvas, { timestamp: frameIdx * frameDurationMs });
-    videoEncoder.encode(videoFrame);
-    videoFrame.close();
+    // Create VideoFrame and encode — wrapped in try/catch so a single bad frame
+    // doesn't take down the whole WebView.
+    let videoFrame: VideoFrame | null = null;
+    try {
+      videoFrame = new VideoFrame(canvas, { timestamp: frameIdx * frameDurationMs });
+      frameInFlight = true;
+      videoEncoder.encode(videoFrame);
+      videoFrame.close();
+      videoFrame = null;
+    } catch (err) {
+      log('frame-encode-error', err instanceof Error ? err.message : String(err));
+      try { if (videoFrame) videoFrame.close(); } catch {}
+      return false;
+    } finally {
+      frameInFlight = false;
+    }
 
     framesEncoded++;
     const elapsedMs = performance.now() - startTime;
     const estMsLeft = (elapsedMs / Math.max(1, framesEncoded)) * (totalFrames - framesEncoded);
     const pct = Math.round((framesEncoded / totalFrames) * 100);
     onProgress(pct, framesEncoded, totalFrames, estMsLeft);
+
+    // Trace every 25th frame so the breadcrumb trail stays small but useful.
+    if (frameIdx % 25 === 0) {
+      trace('frame', `${frameIdx}/${totalFrames} encoded=${framesEncoded}`);
+    }
 
     return true;
   }
@@ -592,7 +687,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     if (cancelRef.current) {
       log('cancel', `Cancelled at frame ${i}/${totalFrames}`);
       try { videoEncoder.close(); } catch {}
-      try { audioEncoder.close(); } catch {}
+      try { audioEncoder?.close(); } catch {}
       return;
     }
     const ok = await encodeFrame(i);
@@ -601,7 +696,7 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
       if (seekFailures > 3) {
         onError(`Too many seek failures (${seekFailures}). Aborting to prevent frozen output.`);
         try { videoEncoder.close(); } catch {}
-        try { audioEncoder.close(); } catch {}
+        try { audioEncoder?.close(); } catch {}
         return;
       }
     }
@@ -683,6 +778,8 @@ export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
     blob,
     log: getExportLog(),
   });
+
+  trace('export-finished', `ok frames=${framesEncoded} size=${blob.size}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -695,46 +792,72 @@ export async function startMediaRecorderFallbackExport(opts: {
   mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>;
   audioElementsRef: Map<string, HTMLAudioElement>;
   format: 'mp4' | 'webm';
+  /** Safe mode: video only, no audio tracks. */
+  safeMode?: boolean;
   onProgress: (pct: number) => void;
   onResult: (result: { format: string; resolution: string; duration: number; frames: number; size: number; hasAudio: boolean; blob: Blob }) => void;
   onError: (msg: string) => void;
   cancelRef: { current: boolean };
 }): Promise<void> {
-  const { project, canvas, mediaElementCache, audioElementsRef, format, onProgress, onResult, onError, cancelRef } = opts;
+  const { project, canvas, mediaElementCache, audioElementsRef, format, safeMode = false, onProgress, onResult, onError, cancelRef } = opts;
+
+  trace('export-started', `format=${format} path=mediarecorder`);
 
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     onError('Cannot get canvas context');
+    trace('export-finished', 'failed:no-context');
     return;
   }
 
   const { width: expW, height: expH } = getAspectDimensions(project.aspectRatio, 'export-full', project.resolution);
+  // Round to multiples of 16 for encoder compatibility.
+  const round16 = (n: number) => Math.max(16, Math.round(n / 16) * 16);
+  const rW = round16(expW);
+  const rH = round16(expH);
+  if (rW !== expW || rH !== expH) {
+    canvas.width = rW;
+    canvas.height = rH;
+  } else {
+    canvas.width = expW;
+    canvas.height = expH;
+  }
   const fps = project.fps;
   const totalDuration = Math.max(3, ...project.clips.map((c) => Number((c.startTime + c.duration).toFixed(2))));
   const totalFrames = Math.ceil(totalDuration * fps);
 
-  canvas.width = expW;
-  canvas.height = expH;
+  trace('mediarecorder-init', `${rW}x${rH} @ ${fps}fps, ${totalDuration}s, ${totalFrames} frames`);
 
-  const canvasStream = canvas.captureStream(fps);
+  let canvasStream: MediaStream | null = null;
+  try {
+    canvasStream = canvas.captureStream(fps);
+  } catch (err) {
+    onError(`canvas.captureStream failed: ${err instanceof Error ? err.message : String(err)}`);
+    trace('export-finished', 'failed:capture-stream');
+    return;
+  }
   const combinedStream = new MediaStream();
   canvasStream.getVideoTracks().forEach((t) => combinedStream.addTrack(t));
 
-  // Add audio tracks
-  mediaElementCache.forEach((el) => {
-    if (el instanceof HTMLVideoElement || el instanceof HTMLAudioElement) {
+  // Add audio tracks (skipped in safe mode)
+  if (!safeMode) {
+    mediaElementCache.forEach((el) => {
+      if (el instanceof HTMLVideoElement || el instanceof HTMLAudioElement) {
+        try {
+          const s = (el as any).captureStream();
+          s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
+        } catch {}
+      }
+    });
+    audioElementsRef.forEach((el) => {
       try {
         const s = (el as any).captureStream();
         s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
       } catch {}
-    }
-  });
-  audioElementsRef.forEach((el) => {
-    try {
-      const s = (el as any).captureStream();
-      s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
-    } catch {}
-  });
+    });
+  } else {
+    trace('mediarecorder-audio', 'Safe mode: audio tracks disabled');
+  }
 
   let mimeType = 'video/webm';
   if (format === 'mp4') {
@@ -746,29 +869,50 @@ export async function startMediaRecorderFallbackExport(opts: {
       }
     }
   }
+  trace('mediarecorder-mime', mimeType);
 
-  const recorder = new MediaRecorder(combinedStream, { mimeType });
+  let recorder: MediaRecorder | null = null;
+  try {
+    recorder = new MediaRecorder(combinedStream, { mimeType });
+  } catch (err) {
+    onError(`MediaRecorder creation failed: ${err instanceof Error ? err.message : String(err)}`);
+    trace('export-finished', 'failed:mediarecorder-create');
+    return;
+  }
   const chunks: Blob[] = [];
   let frameCount = 0;
 
   recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
 
   recorder.onstop = () => {
-    const isMp4 = mimeType.includes('mp4');
-    const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
-    const audioTracks = combinedStream.getAudioTracks();
-    onResult({
-      format: isMp4 ? 'MP4 (H.264 + AAC)' : 'WebM (VP9)',
-      resolution: project.resolution,
-      duration: totalDuration,
-      frames: frameCount,
-      size: blob.size,
-      hasAudio: audioTracks.length > 0,
-      blob,
-    });
+    try {
+      const isMp4 = mimeType.includes('mp4');
+      const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
+      const audioTracks = combinedStream.getAudioTracks();
+      onResult({
+        format: isMp4 ? 'MP4 (H.264 + AAC)' : 'WebM (VP9)',
+        resolution: project.resolution,
+        duration: totalDuration,
+        frames: frameCount,
+        size: blob.size,
+        hasAudio: audioTracks.length > 0,
+        blob,
+      });
+      trace('export-finished', `ok frames=${frameCount} size=${blob.size}`);
+    } catch (err) {
+      onError(`MediaRecorder onstop failed: ${err instanceof Error ? err.message : String(err)}`);
+      trace('export-finished', 'failed:onstop');
+    }
   };
 
-  recorder.start(1000);
+  try {
+    recorder.start(1000);
+    trace('mediarecorder-started', `state=${recorder.state}`);
+  } catch (err) {
+    onError(`MediaRecorder.start failed: ${err instanceof Error ? err.message : String(err)}`);
+    trace('export-finished', 'failed:mediarecorder-start');
+    return;
+  }
 
   const startTime = performance.now();
   let frameInterval: ReturnType<typeof setInterval> | null = null;
@@ -785,14 +929,14 @@ export async function startMediaRecorderFallbackExport(opts: {
     exportAborted = true;
     if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
     if (finishTimeout) { clearTimeout(finishTimeout); finishTimeout = null; }
-    try { if (recorder.state !== 'inactive') recorder.stop(); } catch {}
+    try { if (recorder?.state !== 'inactive') recorder?.stop(); } catch {}
     onError(msg);
   }
 
   async function drawNextFrame() {
     if (cancelRef.current) {
       if (frameInterval) clearInterval(frameInterval);
-      recorder.stop();
+      recorder?.stop();
       return;
     }
     const t = frameCount / fps;
@@ -819,7 +963,12 @@ export async function startMediaRecorderFallbackExport(opts: {
       }
     }
 
-    renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
+    try {
+      renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
+    } catch (err) {
+      abortExport(`Frame draw failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
 
     // Stall detection: if the element is not ready or refused to seek, the
     // canvas would repeat the same frame — abort before producing a photo.
@@ -837,6 +986,7 @@ export async function startMediaRecorderFallbackExport(opts: {
     }
     if (stalled) {
       consecutiveStalls++;
+      trace('stall', `${consecutiveStalls}/${MAX_STALLS} at frame ${frameCount}`);
       if (consecutiveStalls > MAX_STALLS) {
         abortExport('Export failed: video element stalled — frames are not changing');
         return;
@@ -850,9 +1000,14 @@ export async function startMediaRecorderFallbackExport(opts: {
     const elapsed = (performance.now() - startTime) / 1000;
     onProgress(pct);
 
+    // Trace every 25th frame
+    if (frameCount % 25 === 0) {
+      trace('frame', `${frameCount}/${totalFrames} pct=${pct}`);
+    }
+
     if (frameCount >= totalFrames) {
       if (frameInterval) clearInterval(frameInterval);
-      recorder.stop();
+      recorder?.stop();
     }
   }
 
@@ -862,7 +1017,7 @@ export async function startMediaRecorderFallbackExport(opts: {
 
   finishTimeout = setTimeout(() => {
     if (frameInterval) clearInterval(frameInterval);
-    if (!exportAborted && recorder.state !== 'inactive') recorder.stop();
+    if (!exportAborted && recorder?.state !== 'inactive') recorder?.stop();
   }, totalDuration * 1000 + 2000);
 }
 
