@@ -70,7 +70,7 @@ public class MediaSaverPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
           saveViaMediaStore(activity, call, src, displayName, mimeType, expectedSize);
         } else {
-          saveLegacy(activity, call, src, displayName, mimeType);
+          saveLegacy(activity, call, src, displayName, mimeType, expectedSize);
         }
       } catch (Exception e) {
         call.reject("Save failed: " + e.getMessage(), e);
@@ -122,7 +122,7 @@ public class MediaSaverPlugin extends Plugin {
     call.resolve(ret);
   }
 
-  private void saveLegacy(Activity activity, PluginCall call, File src, String displayName, String mimeType) throws Exception {
+  private void saveLegacy(Activity activity, PluginCall call, File src, String displayName, String mimeType, long expectedSize) throws Exception {
     if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         != PackageManager.PERMISSION_GRANTED) {
       call.reject("WRITE_EXTERNAL_STORAGE permission is required on Android 9 and below");
