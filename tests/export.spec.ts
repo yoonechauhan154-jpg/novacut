@@ -194,10 +194,10 @@ test('EXPORT: negative test - stalled video element aborts with clear error', as
   await expect(startBtn).toBeVisible({ timeout: 5000 });
   await startBtn.click();
 
-  await page.waitForTimeout(5000);
-
+  // Stall detection aborts within ~200ms (4 consecutive stalled frames at 30fps).
+  // Check for the error toast immediately — toasts auto-hide after a few seconds.
   const errorToast = page.locator(':has-text("Export error"), :has-text("Too many seek failures"), :has-text("frames are not changing")').first();
-  await expect(errorToast).toBeVisible({ timeout: 5000 });
+  await expect(errorToast).toBeVisible({ timeout: 10000 });
 
   const verified = page.locator('text=Verified');
   await expect(verified).toHaveCount(0);
