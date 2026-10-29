@@ -1,3 +1,6 @@
+import { createExportMedia, seekVideo } from './exportMedia';
+import labVideoUrl from '../../test-assets/test-5s.mp4?url';
+import { createBaseClip } from '../data/presets';
 import { ProjectData, TimelineClip } from '../types/editor';
 import { renderProjectFrame, getAspectDimensions } from '../utils/canvasRenderer';
 import { saveAndShareFileOnDevice } from '../utils/androidBridge';
@@ -31,7 +34,7 @@ export interface ExportOptions {
     hasAudio: boolean;
     blob: Blob;
     log: ExportLogEntry[];
-  }) => void;
+  }) => void | Promise<void>;
   onError: (msg: string) => void;
   cancelRef: { current: boolean };
 }
@@ -49,7 +52,7 @@ export interface WebCodecsSupport {
 
 let exportLog: ExportLogEntry[] = [];
 
-function logExport(step: string, detail: string) {
+export function logExport(step: string, detail: string) {
   const entry: ExportLogEntry = { step, detail, ts: Date.now() };
   exportLog.push(entry);
   console.log(`[EXPORT][${step}] ${detail}`);
@@ -192,24 +195,6 @@ export async function checkResolutionSupported(
 /*  Frame seek helper                                                 */
 /* ------------------------------------------------------------------ */
 
-/**
- * Seek a video element to a target time.
- * Sets currentTime synchronously and returns immediately without waiting for seeked.
- * The browser decodes the nearest frame on the next RAF.
- * Returns true if the element is ready (readyState >= 2), false otherwise.
- */
-async function seekToFrame(
-  el: HTMLVideoElement,
-  targetTime: number,
-  timeoutMs: number = 3000
-): Promise<boolean> {
-  if (el.readyState < 2) return false;
-  const prevTime = el.currentTime;
-  el.currentTime = targetTime;
-  // currentTime assignment is synchronous; if it changed, seek was initiated
-  return Math.abs(el.currentTime - prevTime) > 0.001 || el.currentTime === targetTime;
-}
-
 /* ------------------------------------------------------------------ */
 /*  Offline audio rendering + AAC encoding                            */
 /* ------------------------------------------------------------------ */
@@ -303,14 +288,14 @@ function audioBufferToPcmChunks(
  * Render the full project audio offline: decode all video/audio sources,
  * apply start/end/speed/volume/fades, mix in OfflineAudioContext.
  */
-async function renderProjectAudio(
+export async function renderProjectAudio(
   project: ProjectData,
   audioElementsRef: Map<string, HTMLAudioElement>,
   mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>,
   onLog: (step: string, detail: string) => void
 ): Promise<{ buffer: AudioBuffer | null; hasAudio: boolean }> {
   const sampleRate = 48000;
-  const duration = Math.max(3, ...project.clips.map((c) => c.startTime + c.duration));
+  const duration = Math.max(0.01, ...project.clips.map((c) => c.startTime + c.duration));
   const offline = new OfflineAudioContext(2, duration * sampleRate, sampleRate);
   let hasAnyAudio = false;
 
@@ -340,12 +325,12 @@ async function renderProjectAudio(
     source.playbackRate.value = clip.speed || 1;
 
     const gain = offline.createGain();
-    const vol = Math.max(0, Math.min(2, (clip.volume || 100) / 100));
+    const vol = Math.max(0, Math.min(2, (clip.volume ?? 100) / 100));
     gain.gain.value = vol;
 
     if (clip.fadeIn && clip.fadeIn > 0) {
-      gain.gain.setValueAtTime(0, offline.currentTime);
-      gain.gain.linearRampToValueAtTime(vol, offline.currentTime + clip.fadeIn);
+      gain.gain.setValueAtTime(0, clip.startTime);
+      gain.gain.linearRampToValueAtTime(vol, clip.startTime + clip.fadeIn);
     }
     if (clip.fadeOut && clip.fadeOut > 0) {
       const endTime = clip.startTime + clip.duration;
@@ -357,7 +342,8 @@ async function renderProjectAudio(
     gain.connect(offline.destination);
 
     const startOffset = Math.max(0, clip.sourceStart || 0);
-    source.start(clip.startTime, startOffset, clip.duration);
+    source.start(clip.startTime, startOffset, clip.duration * clip.speed);
+    source.stop(clip.startTime + clip.duration);
   }
 
   onLog('audio-render', `Started offline audio render (${duration.toFixed(2)}s, ${sampleRate}Hz)`);
@@ -372,653 +358,23 @@ async function renderProjectAudio(
 /* ------------------------------------------------------------------ */
 
 export async function startWebCodecsExport(opts: ExportOptions): Promise<void> {
-  const {
-    project,
-    canvas,
-    mediaElementCache,
-    audioElementsRef,
-    format,
-    safeMode = false,
-    onProgress,
-    onResult,
-    onError,
-    cancelRef,
-  } = opts;
-
-  clearExportLog();
-  const log = (step: string, detail: string) => logExport(step, detail);
-
-  // Breadcrumbs: mark export start so a crash is visible on next app start.
-  trace('export-started', `format=${format}`);
-
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) {
-    onError('Cannot get 2D context on export canvas');
-    trace('export-finished', 'failed:no-context');
-    return;
-  }
-
-  // --- Determine resolution ---
-  const { width: expW, height: expH } = getAspectDimensions(
-    project.aspectRatio,
-    'export-full',
-    project.resolution
-  );
-  // VideoEncoder requires width/height to be multiples of 16 on many Android WebViews.
-  const round16 = (n: number) => Math.max(16, Math.round(n / 16) * 16);
-  const rW = round16(expW);
-  const rH = round16(expH);
-  if (rW !== expW || rH !== expH) {
-    log('resolution-round', `${expW}x${expH} -> ${rW}x${rH} (multiple of 16)`);
-  }
-  const fps = project.fps;
-  const totalDuration = Math.max(
-    3,
-    ...project.clips.map((c) => Number((c.startTime + c.duration).toFixed(2)))
-  );
-  const totalFrames = Math.ceil(totalDuration * fps);
-  const frameDurationMs = 1000 / fps;
-
-  log('init', `Export ${format.toUpperCase()} ${rW}x${rH} @ ${fps}fps, ${totalDuration}s, ${totalFrames} frames`);
-
-  // --- Probe WebCodecs support ---
-  const support = await probeWebCodecsSupport();
-  log('probe', `WebCodecs available=${support.available} video=${support.videoCodec} audio=${support.audioCodec}`);
-
-  if (!support.available || !support.videoCodec) {
-    onError(
-      `WebCodecs not available on this device: ${support.reason || 'unknown reason'}. ` +
-        'MP4 export requires a WebView with WebCodecs support (Chrome 94+/Android 12+).'
-    );
-    trace('export-finished', 'failed:no-webcodecs');
-    return;
-  }
-
-  // --- Resolution fallback check ---
-  let actualW = rW;
-  let actualH = rH;
-  const resCheck = await checkResolutionSupported(rW, rH, fps, support.videoCodec);
-  log('resolution', `Requested ${rW}x${rH} supported=${resCheck.supported}`);
-  if (!resCheck.supported && resCheck.fallbackWidth) {
-    log('resolution-fallback', `Falling back to ${resCheck.fallbackWidth}x${resCheck.fallbackHeight}`);
-    actualW = resCheck.fallbackWidth;
-    actualH = resCheck.fallbackHeight ?? 720;
-    canvas.width = actualW;
-    canvas.height = actualH;
-    log('resolution', `Canvas resized to ${actualW}x${actualH}`);
-  } else {
-    canvas.width = actualW;
-    canvas.height = actualH;
-  }
-
-  // --- Set up VideoEncoder ---
-  // ~2 Mbps for 480p, scaling linearly with resolution; floor at 500 kbps.
-  const videoBitrate = Math.max(500_000, Math.round(actualW * actualH * 0.10));
-  const videoChunks: EncodedVideoChunk[] = [];
-  let videoChunkCount = 0;
-
-  const videoEncoder = new VideoEncoder({
-    output: (chunk, meta) => {
-      videoChunks.push(chunk);
-      videoChunkCount++;
-    },
-    error: (e) => {
-      log('encoder-error', e.message);
-      onError(`VideoEncoder error: ${e.message}`);
-    },
-  });
-
-  const encConfig: any = {
-    codec: support.videoCodec,
-    width: actualW,
-    height: actualH,
-    bitrate: videoBitrate,
-    framerate: fps,
-  };
-  // Prefer software encoder first (more stable on old WebViews), then hardware.
+  trace('export-started', 'webcodecs');
   try {
-    encConfig.hardwareAcceleration = 'prefer-software';
-  } catch {}
-  try {
-    videoEncoder.configure(encConfig);
-    log('encoder-config', JSON.stringify({ codec: support.videoCodec, width: actualW, height: actualH, bitrate: videoBitrate, framerate: fps, hw: 'prefer-software' }));
+    const { encodeWebCodecs } = await import('./webCodecsExport');
+    await encodeWebCodecs(opts, logExport);
   } catch (err) {
-    log('encoder-config-error', err instanceof Error ? err.message : String(err));
-    // Retry without hardwareAcceleration hint
-    try {
-      delete encConfig.hardwareAcceleration;
-      videoEncoder.configure(encConfig);
-      log('encoder-config', JSON.stringify({ codec: support.videoCodec, width: actualW, height: actualH, bitrate: videoBitrate, framerate: fps, hw: 'default' }));
-    } catch (err2) {
-      onError(`VideoEncoder configure failed: ${err2 instanceof Error ? err2.message : String(err2)}`);
-      trace('export-finished', 'failed:encoder-configure');
-      return;
-    }
+    if (!opts.cancelRef.current) opts.onError(err instanceof Error ? err.message : String(err));
   }
-
-  // --- Set up AudioEncoder ---
-  const audioChunks: EncodedAudioChunk[] = [];
-  let audioChunkCount = 0;
-  let hasAudio = false;
-  let audioCodec = support.audioCodec;
-  let audioEncoder: AudioEncoder | null = null;
-
-  // Safe mode: skip audio entirely (video only).
-  if (!safeMode) {
-    audioEncoder = new AudioEncoder({
-      output: (chunk, meta) => {
-        audioChunks.push(chunk);
-        audioChunkCount++;
-      },
-      error: (e) => {
-        log('audio-encoder-error', e.message);
-        // Non-fatal: continue without audio
-        hasAudio = false;
-      },
-    });
-
-    audioEncoder.configure({
-      codec: audioCodec!,
-      numberOfChannels: 2,
-      sampleRate: 48000,
-      bitrate: 128_000,
-    });
-    log('audio-encoder-config', JSON.stringify({ codec: audioCodec, channels: 2, sampleRate: 48000, bitrate: 128000 }));
-
-    // --- Render audio offline ---
-    let audioBuffer: AudioBuffer | null = null;
-    try {
-      const audioResult = await renderProjectAudio(
-        project,
-        audioElementsRef,
-        mediaElementCache,
-        log
-      );
-      audioBuffer = audioResult.buffer;
-      hasAudio = audioResult.hasAudio && !!audioBuffer;
-    } catch (err) {
-      log('audio-render-error', err instanceof Error ? err.message : String(err));
-      hasAudio = false;
-    }
-
-    // --- Feed PCM chunks to AudioEncoder ---
-    if (hasAudio && audioBuffer) {
-      const pcmChunks = audioBufferToPcmChunks(audioBuffer, 1024);
-      log('audio-pcm', `Prepared ${pcmChunks.length} PCM chunks for AudioEncoder`);
-      for (const pcm of pcmChunks) {
-        if (cancelRef.current) break;
-        try {
-          const audioData = new AudioData({
-            data: pcm.data.buffer as unknown as ArrayBuffer,
-            format: 's16',
-            numberOfChannels: 2,
-            numberOfFrames: pcm.data.length / 2,
-            sampleRate: 48000,
-            timestamp: pcm.timestampUs,
-          });
-          audioEncoder.encode(audioData);
-          audioData.close();
-        } catch (err) {
-          log('audio-encode-error', err instanceof Error ? err.message : String(err));
-          hasAudio = false;
-          break;
-        }
-      }
-      await audioEncoder.flush();
-      try { audioEncoder.close(); } catch {}
-    }
-  } else {
-    log('audio-skip', 'Safe mode: audio disabled');
-  }
-
-  // --- Frame-by-frame video rendering ---
-  log('video-start', `Starting frame-by-frame video encoding: ${totalFrames} frames`);
-
-  const startTime = performance.now();
-  let framesEncoded = 0;
-  let seeks = 0;
-  let seekFailures = 0;
-  // Flow control: only one frame in flight at a time to bound encoder memory.
-  let frameInFlight = false;
-  function waitForEncoderSlot(): Promise<void> {
-    if (!frameInFlight) return Promise.resolve();
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        if (!frameInFlight) resolve();
-        else setTimeout(check, 0);
-      };
-      check();
-    });
-  }
-
-  function getClipVideoElement(clip: TimelineClip): HTMLVideoElement | null {
-    if (clip.trackType !== 'video' && clip.trackType !== 'overlay') return null;
-    if (clip.sourceType !== 'uploaded-video') return null;
-    const cached = mediaElementCache.get(clip.id);
-    return cached instanceof HTMLVideoElement ? cached : null;
-  }
-
-  async function encodeFrame(frameIdx: number): Promise<boolean> {
-    if (cancelRef.current) return false;
-
-    const t = frameIdx / fps;
-
-    // Seek all active video elements to their source times
-    const videoClips = project.clips.filter(
-      (c) =>
-        (c.trackType === 'video' || c.trackType === 'overlay') &&
-        c.sourceType === 'uploaded-video' &&
-        c.mediaUrl &&
-        t >= c.startTime &&
-        t <= c.startTime + c.duration
-    );
-
-    const seekPromises: Promise<boolean>[] = [];
-    let frameSeekFailed = false;
-    for (const clip of videoClips) {
-      const el = getClipVideoElement(clip);
-      if (!el) continue;
-
-      const relTime = t - clip.startTime;
-      const sourceTime =
-        (clip.sourceStart + relTime * clip.speed) % Math.max(0.5, el.duration || clip.duration);
-
-      if (Math.abs(el.currentTime - sourceTime) > 0.05) {
-        seeks++;
-        seekPromises.push(
-          seekToFrame(el, sourceTime).then((ok) => {
-            if (!ok) frameSeekFailed = true;
-            return ok;
-          })
-        );
-      }
-    }
-
-    await Promise.all(seekPromises);
-
-    if (frameSeekFailed) return false;
-
-    if (cancelRef.current) return false;
-
-    // Brief delay for the browser to decode the seeked frame.
-    await new Promise((r) => setTimeout(r, 16));
-
-    // Draw the frame to canvas
-    try {
-      renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
-    } catch (err) {
-      log('frame-draw-error', err instanceof Error ? err.message : String(err));
-      return false;
-    }
-
-    // Create VideoFrame and encode — wrapped in try/catch so a single bad frame
-    // doesn't take down the whole WebView.
-    let videoFrame: VideoFrame | null = null;
-    try {
-      videoFrame = new VideoFrame(canvas, { timestamp: frameIdx * frameDurationMs });
-      frameInFlight = true;
-      videoEncoder.encode(videoFrame);
-      videoFrame.close();
-      videoFrame = null;
-    } catch (err) {
-      log('frame-encode-error', err instanceof Error ? err.message : String(err));
-      try { if (videoFrame) videoFrame.close(); } catch {}
-      return false;
-    } finally {
-      frameInFlight = false;
-    }
-
-    framesEncoded++;
-    const elapsedMs = performance.now() - startTime;
-    const estMsLeft = (elapsedMs / Math.max(1, framesEncoded)) * (totalFrames - framesEncoded);
-    const pct = Math.round((framesEncoded / totalFrames) * 100);
-    onProgress(pct, framesEncoded, totalFrames, estMsLeft);
-
-    // Trace every 25th frame so the breadcrumb trail stays small but useful.
-    if (frameIdx % 25 === 0) {
-      trace('frame', `${frameIdx}/${totalFrames} encoded=${framesEncoded}`);
-    }
-
-    return true;
-  }
-
-  // Encode all frames sequentially
-  for (let i = 0; i < totalFrames; i++) {
-    if (cancelRef.current) {
-      log('cancel', `Cancelled at frame ${i}/${totalFrames}`);
-      try { videoEncoder.close(); } catch {}
-      try { audioEncoder?.close(); } catch {}
-      return;
-    }
-    const ok = await encodeFrame(i);
-    if (!ok && !cancelRef.current) {
-      seekFailures++;
-      if (seekFailures > 3) {
-        onError(`Too many seek failures (${seekFailures}). Aborting to prevent frozen output.`);
-        try { videoEncoder.close(); } catch {}
-        try { audioEncoder?.close(); } catch {}
-        return;
-      }
-    }
-  }
-
-  log('video-done', `Encoded ${framesEncoded}/${totalFrames} frames, ${videoChunkCount} chunks, ${seeks} seeks, ${seekFailures} failures`);
-
-  // Flush video encoder
-  await videoEncoder.flush();
-  videoEncoder.close();
-
-  // --- Mux with mp4-muxer ---
-  let Muxer: any;
-  let ArrayBufferTarget: any;
-  try {
-    const mod = await import('mp4-muxer');
-    Muxer = mod.Muxer;
-    ArrayBufferTarget = mod.ArrayBufferTarget;
-  } catch (err) {
-    onError(`Failed to load mp4-muxer: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  log('mux-start', `Muxing ${videoChunks.length} video chunks, ${audioChunks.length} audio chunks`);
-
-  const target = new ArrayBufferTarget();
-  const muxer = new Muxer({
-    target,
-    video: {
-      codec: 'avc',
-      width: actualW,
-      height: actualH,
-      frameRate: fps,
-    },
-    audio: hasAudio
-      ? {
-          codec: audioCodec === 'mp4a.40.2' ? 'aac' : 'opus',
-          numberOfChannels: 2,
-          sampleRate: 48000,
-        }
-      : undefined,
-    fastStart: 'in-memory',
-    firstTimestampBehavior: 'offset',
-  });
-
-  // Add video chunks
-  for (const chunk of videoChunks) {
-    if (cancelRef.current) break;
-    muxer.addVideoChunk(chunk);
-  }
-
-  // Add audio chunks
-  for (const chunk of audioChunks) {
-    if (cancelRef.current) break;
-    muxer.addAudioChunk(chunk);
-  }
-
-  if (cancelRef.current) {
-    log('cancel', 'Cancelled during mux');
-    return;
-  }
-
-  muxer.finalize();
-  const muxedBuffer = target.buffer;
-
-  log('mux-done', `Muxed ${muxedBuffer.byteLength} bytes`);
-
-  const blob = new Blob([muxedBuffer], { type: 'video/mp4' });
-
-  log('result', `Produced ${blob.size} bytes, ${framesEncoded} frames, audio=${hasAudio}, audioChunks=${audioChunkCount}`);
-
-  onResult({
-    format: 'MP4 (H.264 + AAC)',
-    resolution: project.resolution,
-    duration: totalDuration,
-    frames: framesEncoded,
-    size: blob.size,
-    hasAudio: hasAudio && audioChunkCount > 0,
-    blob,
-    log: getExportLog(),
-  });
-
-  trace('export-finished', `ok frames=${framesEncoded} size=${blob.size}`);
 }
 
-/* ------------------------------------------------------------------ */
-/*  MediaRecorder fallback (deterministic frame-by-frame)             */
-/* ------------------------------------------------------------------ */
-
-export async function startMediaRecorderFallbackExport(opts: {
-  project: ProjectData;
-  canvas: HTMLCanvasElement;
-  mediaElementCache: Map<string, HTMLVideoElement | HTMLImageElement>;
-  audioElementsRef: Map<string, HTMLAudioElement>;
-  format: 'mp4' | 'webm';
-  /** Safe mode: video only, no audio tracks. */
-  safeMode?: boolean;
-  onProgress: (pct: number) => void;
-  onResult: (result: { format: string; resolution: string; duration: number; frames: number; size: number; hasAudio: boolean; blob: Blob }) => void;
-  onError: (msg: string) => void;
-  cancelRef: { current: boolean };
-}): Promise<void> {
-  const { project, canvas, mediaElementCache, audioElementsRef, format, safeMode = false, onProgress, onResult, onError, cancelRef } = opts;
-
-  trace('export-started', `format=${format} path=mediarecorder`);
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    onError('Cannot get canvas context');
-    trace('export-finished', 'failed:no-context');
-    return;
-  }
-
-  const { width: expW, height: expH } = getAspectDimensions(project.aspectRatio, 'export-full', project.resolution);
-  // Round to multiples of 16 for encoder compatibility.
-  const round16 = (n: number) => Math.max(16, Math.round(n / 16) * 16);
-  const rW = round16(expW);
-  const rH = round16(expH);
-  if (rW !== expW || rH !== expH) {
-    canvas.width = rW;
-    canvas.height = rH;
-  } else {
-    canvas.width = expW;
-    canvas.height = expH;
-  }
-  const fps = project.fps;
-  const totalDuration = Math.max(3, ...project.clips.map((c) => Number((c.startTime + c.duration).toFixed(2))));
-  const totalFrames = Math.ceil(totalDuration * fps);
-
-  trace('mediarecorder-init', `${rW}x${rH} @ ${fps}fps, ${totalDuration}s, ${totalFrames} frames`);
-
-  let canvasStream: MediaStream | null = null;
+export async function startMediaRecorderFallbackExport(opts: ExportOptions): Promise<void> {
+  trace('export-started', 'recorder');
   try {
-    canvasStream = canvas.captureStream(fps);
+    const { encodeRecorder } = await import('./recorderExport');
+    await encodeRecorder(opts, logExport);
   } catch (err) {
-    onError(`canvas.captureStream failed: ${err instanceof Error ? err.message : String(err)}`);
-    trace('export-finished', 'failed:capture-stream');
-    return;
+    if (!opts.cancelRef.current) opts.onError(err instanceof Error ? err.message : String(err));
   }
-  const combinedStream = new MediaStream();
-  canvasStream.getVideoTracks().forEach((t) => combinedStream.addTrack(t));
-
-  // Add audio tracks (skipped in safe mode)
-  if (!safeMode) {
-    mediaElementCache.forEach((el) => {
-      if (el instanceof HTMLVideoElement || el instanceof HTMLAudioElement) {
-        try {
-          const s = (el as any).captureStream();
-          s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
-        } catch {}
-      }
-    });
-    audioElementsRef.forEach((el) => {
-      try {
-        const s = (el as any).captureStream();
-        s.getAudioTracks().forEach((t: MediaStreamTrack) => combinedStream.addTrack(t));
-      } catch {}
-    });
-  } else {
-    trace('mediarecorder-audio', 'Safe mode: audio tracks disabled');
-  }
-
-  let mimeType = 'video/webm';
-  if (format === 'mp4') {
-    const cands = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9'];
-    for (const c of cands) {
-      if (MediaRecorder.isTypeSupported(c)) {
-        mimeType = c;
-        break;
-      }
-    }
-  }
-  trace('mediarecorder-mime', mimeType);
-
-  let recorder: MediaRecorder | null = null;
-  try {
-    recorder = new MediaRecorder(combinedStream, { mimeType });
-  } catch (err) {
-    onError(`MediaRecorder creation failed: ${err instanceof Error ? err.message : String(err)}`);
-    trace('export-finished', 'failed:mediarecorder-create');
-    return;
-  }
-  const chunks: Blob[] = [];
-  let frameCount = 0;
-
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-
-  recorder.onstop = () => {
-    try {
-      const isMp4 = mimeType.includes('mp4');
-      const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
-      const audioTracks = combinedStream.getAudioTracks();
-      onResult({
-        format: isMp4 ? 'MP4 (H.264 + AAC)' : 'WebM (VP9)',
-        resolution: project.resolution,
-        duration: totalDuration,
-        frames: frameCount,
-        size: blob.size,
-        hasAudio: audioTracks.length > 0,
-        blob,
-      });
-      trace('export-finished', `ok frames=${frameCount} size=${blob.size}`);
-    } catch (err) {
-      onError(`MediaRecorder onstop failed: ${err instanceof Error ? err.message : String(err)}`);
-      trace('export-finished', 'failed:onstop');
-    }
-  };
-
-  try {
-    recorder.start(1000);
-    trace('mediarecorder-started', `state=${recorder.state}`);
-  } catch (err) {
-    onError(`MediaRecorder.start failed: ${err instanceof Error ? err.message : String(err)}`);
-    trace('export-finished', 'failed:mediarecorder-start');
-    return;
-  }
-
-  const startTime = performance.now();
-  let frameInterval: ReturnType<typeof setInterval> | null = null;
-  let finishTimeout: ReturnType<typeof setTimeout> | null = null;
-  const frameDurationMs = 1000 / fps;
-  // Abort the export when the media element stops seeking (frozen output).
-  // Never silently emit a still photo as a video.
-  let consecutiveStalls = 0;
-  const MAX_STALLS = 3;
-  let exportAborted = false;
-
-  function abortExport(msg: string) {
-    if (exportAborted) return;
-    exportAborted = true;
-    if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
-    if (finishTimeout) { clearTimeout(finishTimeout); finishTimeout = null; }
-    try { if (recorder?.state !== 'inactive') recorder?.stop(); } catch {}
-    onError(msg);
-  }
-
-  async function drawNextFrame() {
-    if (cancelRef.current) {
-      if (frameInterval) clearInterval(frameInterval);
-      recorder?.stop();
-      return;
-    }
-    const t = frameCount / fps;
-
-    // Seek the active video source to this frame's time, exactly like the
-    // WebCodecs path does. renderProjectFrame skips its own re-seek when the
-    // element is already at the target (diff < 0.28).
-    const activeClip = project.clips.find(
-      (c) =>
-        (c.trackType === 'video' || c.trackType === 'overlay') &&
-        c.sourceType === 'uploaded-video' &&
-        c.mediaUrl &&
-        t >= c.startTime &&
-        t <= c.startTime + c.duration
-    );
-    let sourceTime = 0;
-    if (activeClip) {
-      const el = mediaElementCache.get(activeClip.id);
-      if (el instanceof HTMLVideoElement) {
-        sourceTime =
-          (activeClip.sourceStart + (t - activeClip.startTime) * activeClip.speed) %
-          Math.max(0.5, el.duration || activeClip.duration);
-        el.currentTime = Math.max(0, sourceTime);
-      }
-    }
-
-    try {
-      renderProjectFrame(ctx!, project, t, mediaElementCache, 'export-full', false);
-    } catch (err) {
-      abortExport(`Frame draw failed: ${err instanceof Error ? err.message : String(err)}`);
-      return;
-    }
-
-    // Stall detection: if the element is not ready or refused to seek, the
-    // canvas would repeat the same frame — abort before producing a photo.
-    let stalled = false;
-    if (activeClip) {
-      const el = mediaElementCache.get(activeClip.id);
-      if (!(el instanceof HTMLVideoElement) || el.readyState < 2) {
-        stalled = true;
-      } else {
-        const check =
-          (activeClip.sourceStart + (t - activeClip.startTime) * activeClip.speed) %
-          Math.max(0.5, el.duration || activeClip.duration);
-        if (Math.abs(el.currentTime - check) > 0.1) stalled = true;
-      }
-    }
-    if (stalled) {
-      consecutiveStalls++;
-      trace('stall', `${consecutiveStalls}/${MAX_STALLS} at frame ${frameCount}`);
-      if (consecutiveStalls > MAX_STALLS) {
-        abortExport('Export failed: video element stalled — frames are not changing');
-        return;
-      }
-    } else {
-      consecutiveStalls = 0;
-    }
-
-    frameCount++;
-    const pct = Math.round((frameCount / totalFrames) * 100);
-    const elapsed = (performance.now() - startTime) / 1000;
-    onProgress(pct);
-
-    // Trace every 25th frame
-    if (frameCount % 25 === 0) {
-      trace('frame', `${frameCount}/${totalFrames} pct=${pct}`);
-    }
-
-    if (frameCount >= totalFrames) {
-      if (frameInterval) clearInterval(frameInterval);
-      recorder?.stop();
-    }
-  }
-
-  frameInterval = setInterval(() => {
-    drawNextFrame().catch(() => {});
-  }, frameDurationMs);
-
-  finishTimeout = setTimeout(() => {
-    if (frameInterval) clearInterval(frameInterval);
-    if (!exportAborted && recorder?.state !== 'inactive') recorder?.stop();
-  }, totalDuration * 1000 + 2000);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1173,15 +529,7 @@ async function runLabT1(
     }
     const target = (duration * i) / 59;
     trace('lab-t1-seek', `seeking to ${target.toFixed(3)}s (${i + 1}/60)`);
-    el.currentTime = target;
-    // Wait for seeked or 300ms timeout
-    await new Promise<void>((resolve) => {
-      const started = performance.now();
-      const onSeeked = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
-      const onTimeout = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
-      el.addEventListener('seeked', onSeeked, { once: true });
-      setTimeout(onTimeout, 300);
-    });
+    await seekVideo(el, target, cancelRef, logExport);
   }
   trace('lab-t1-done', 'all 60 seeks completed');
   return { testType: 'T1', status: 'ok', step: 'done', detail: '60 seeks completed without crash', framesEncoded: 0 };
@@ -1223,14 +571,7 @@ async function runLabT2(
     }
     const t = (duration * i) / 59;
     trace('lab-t2-draw', `draw frame ${i + 1}/60 at t=${t.toFixed(3)}s`);
-    el.currentTime = t;
-    await new Promise<void>((resolve) => {
-      const started = performance.now();
-      const onSeeked = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
-      const onTimeout = () => { el.removeEventListener('seeked', onSeeked); resolve(); };
-      el.addEventListener('seeked', onSeeked, { once: true });
-      setTimeout(onTimeout, 300);
-    });
+    await seekVideo(el, t, cancelRef, logExport);
     try {
       ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
     } catch (err) {
@@ -1295,7 +636,7 @@ async function runLabT3(
     ctx.fillRect(x, h / 2 - 20, 40, 40);
     let videoFrame: VideoFrame | null = null;
     try {
-      videoFrame = new VideoFrame(canvas, { timestamp: i * (1000 / fps) });
+      videoFrame = new VideoFrame(canvas, { timestamp: Math.round(i * (1_000_000 / fps)) });
       videoEncoder.encode(videoFrame);
       videoFrame.close();
       videoFrame = null;
@@ -1364,7 +705,7 @@ async function runLabT4(
     }
     let videoFrame: VideoFrame | null = null;
     try {
-      videoFrame = new VideoFrame(rgba, { format: 'RGBA', codedWidth: w, codedHeight: h, timestamp: i * (1000 / fps) });
+      videoFrame = new VideoFrame(rgba, { format: 'RGBA', codedWidth: w, codedHeight: h, timestamp: Math.round(i * (1_000_000 / fps)) });
       videoEncoder.encode(videoFrame);
       videoFrame.close();
       videoFrame = null;
@@ -1425,14 +766,29 @@ export async function runExportLabTest(
   audioElementsRef: Map<string, HTMLAudioElement>,
   cancelRef: { current: boolean },
 ): Promise<ExportLabResult> {
-  switch (testType) {
-    case 'T1': return runLabT1(mediaElementCache, project, cancelRef);
-    case 'T2': return runLabT2(mediaElementCache, project, canvas, cancelRef);
-    case 'T3': return runLabT3(canvas, cancelRef);
-    case 'T4': return runLabT4(cancelRef);
-    case 'T5': return runLabT5(project, canvas, mediaElementCache, audioElementsRef, cancelRef);
-    default: return { testType, status: 'error', step: 'unknown-test', detail: `Unknown test type ${testType}`, framesEncoded: 0 };
-  }
+  const ownCanvas = document.createElement('canvas');
+  ownCanvas.width = 480; ownCanvas.height = 360;
+  // Settings has no editor canvas. Always own the test media and use a bundled offline fixture if needed.
+  const clip = project.clips.find(c => c.sourceType === 'uploaded-video');
+  const labProject: ProjectData = { ...project, resolution: '480p', clips: [
+    clip ? { ...clip, startTime: 0, duration: Math.min(2, clip.duration) } :
+      createBaseClip({ id: 'export-lab-fixture', trackId: 'main-video', trackType: 'video',
+        title: 'Export Lab', startTime: 0, duration: 2, sourceType: 'uploaded-video', mediaUrl: labVideoUrl }),
+  ] };
+  let resources: Awaited<ReturnType<typeof createExportMedia>> | undefined;
+  try {
+    if (testType === 'T3') return await runLabT3(ownCanvas, cancelRef);
+    if (testType === 'T4') return await runLabT4(cancelRef);
+    resources = await createExportMedia(labProject, cancelRef, logExport);
+    switch (testType) {
+      case 'T1': return await runLabT1(resources.media, labProject, cancelRef);
+      case 'T2': return await runLabT2(resources.media, labProject, ownCanvas, cancelRef);
+      case 'T5': return await runLabT5(labProject, ownCanvas, resources.media, resources.audio, cancelRef);
+      default: throw new Error('Unknown lab test');
+    }
+  } catch (err) {
+    return { testType, status: 'error', step: 'lab-failed', detail: String(err), framesEncoded: 0 };
+  } finally { resources?.dispose(); }
 }
 
 /* ------------------------------------------------------------------ */
