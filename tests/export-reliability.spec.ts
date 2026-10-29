@@ -49,7 +49,7 @@ test('export recovers EOF and missing playback callbacks by seeking the requeste
         seeks++; time = value; ended = false; video.dispatchEvent(new Event('seeked'));
       } });
       video.requestVideoFrameCallback = () => { pending.add(++id); return id; };
-      video.cancelVideoFrameCallback = callback => { pending.delete(callback); };
+      video.cancelVideoFrameCallback = (callback: number) => { pending.delete(callback); };
       video.play = async () => {
         playCalls++;
         if (scenario === 'ends-during-play') { time = 20; ended = true; video.dispatchEvent(new Event('ended')); }
@@ -86,7 +86,7 @@ test('playback recovery still rejects cancellation and an undecodable requested 
       Object.defineProperty(video, 'duration', { get: () => 20 });
       Object.defineProperty(video, 'currentTime', { get: () => 1, set: () => { seeks++; } });
       video.requestVideoFrameCallback = () => { pending.add(++id); return id; };
-      video.cancelVideoFrameCallback = callback => { pending.delete(callback); };
+      video.cancelVideoFrameCallback = (callback: number) => { pending.delete(callback); };
       video.play = async () => { if (scenario === 'cancel') cancel.current = true; };
       video.dataset.exportTime = '1';
       let error = '';
