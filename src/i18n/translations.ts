@@ -13,6 +13,10 @@ export const SUPPORTED_LANGUAGES: LanguageOption[] = [
 
 export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
   en: {
+    exportRecoveryMode: "Prefer Android exporter",
+    exportRecoveryOn: "ON: use Android decoding first when available, preserving supported audio and edits.",
+    exportRecoveryOff: "OFF: try WebView export, then Android fallback if it fails.",
+    exportRecoveryAfterCrash: "The next export will prefer the Android exporter when available. Unsupported edits will be reported.",
     exportNativeSaved: "Verified video saved to Movies/ClipNova.",
     exportVerifiedReady: "Video verified. Tap Save to Gallery or Share.",
     exportFailure: "Export error",
@@ -198,6 +202,10 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     exportLogCopied: 'Export log copied to clipboard.',
   },
   hi: {
+    exportRecoveryMode: "Android एक्सपोर्टर को प्राथमिकता दें",
+    exportRecoveryOn: "चालू: उपलब्ध होने पर पहले Android डिकोडिंग इस्तेमाल करें; समर्थित ऑडियो और एडिट बने रहेंगे।",
+    exportRecoveryOff: "बंद: पहले WebView एक्सपोर्ट; विफल होने पर Android एक्सपोर्टर।",
+    exportRecoveryAfterCrash: "अगले एक्सपोर्ट में उपलब्ध Android एक्सपोर्टर को प्राथमिकता दी जाएगी। असमर्थित एडिट की जानकारी दिखाई जाएगी।",
     exportNativeSaved: "सत्यापित वीडियो Movies/ClipNova में सेव किया गया।",
     exportVerifiedReady: "वीडियो सत्यापित है। गैलरी में सेव करें या शेयर करें।",
     exportFailure: "एक्सपोर्ट त्रुटि",

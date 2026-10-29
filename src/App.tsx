@@ -3359,14 +3359,14 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               );
             })()}
 
-            {/* Export Safe Mode — video only, no audio, software encoder. Auto-enabled after a crash. */}
+            {/* Prefer the native decoder after a process crash. */}
             <div className="p-4 rounded-xl bg-[#0E131F] border border-slate-800 space-y-1.5">
               <div className="flex items-center justify-between">
-                <div className="font-bold text-slate-200 text-sm">Export safe mode</div>
+                <div className="font-bold text-slate-200 text-sm">{t(lang, 'exportRecoveryMode')}</div>
                 <button
                   type="button"
                   onClick={() => setExportSafeMode((p) => !p)}
-                  aria-label="Toggle export safe mode"
+                  aria-label={t(lang, 'exportRecoveryMode')}
                   className={`relative min-w-[44px] min-h-[24px] rounded-full bg-slate-800 ${exportSafeMode ? 'bg-amber-500' : ''} transition-colors duration-200`}
                 >
                   <span
@@ -3375,9 +3375,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                 </button>
               </div>
               <div className="text-[10px] text-slate-400 leading-relaxed">
-                {exportSafeMode
-                  ? 'ON: video-only export, no audio, software encoder. Use this if export crashes the app.'
-                  : 'OFF: normal export with audio and hardware acceleration where available.'}
+                {t(lang, exportSafeMode ? 'exportRecoveryOn' : 'exportRecoveryOff')}
               </div>
             </div>
 
@@ -5636,7 +5634,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                 </div>
               )}
               <div className="text-[10px] text-rose-400">
-                Reopen the app and try Export again. “Export safe mode” is now ON (video only, no audio) to avoid another crash.
+                {t(lang, 'exportRecoveryAfterCrash')}
               </div>
             </div>
 

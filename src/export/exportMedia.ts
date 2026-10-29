@@ -82,9 +82,11 @@ export async function seekVideo(el: HTMLVideoElement, target: number, cancel: Ca
       finish(new Error(detail));
     };
     const onError = () => fail('decoder error');
+    const effectiveTarget = () => Number.isFinite(el.duration) ? Math.min(target, Math.max(0, el.duration - .001)) : target;
     const onSeeked = () => {
+      // WebM may discover a finite duration only after seeking to its last cluster.
       // seeked guarantees current decoded data; rVFC below also catches WebView presentation.
-      if (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - target) < 0.05) finish();
+      if (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - effectiveTarget()) < 0.05) finish();
     };
     const deadline = performance.now() + timeout;
     const timer = setInterval(() => {
@@ -95,7 +97,7 @@ export async function seekVideo(el: HTMLVideoElement, target: number, cancel: Ca
     el.addEventListener('error', onError);
     if (typeof el.requestVideoFrameCallback === 'function') {
       callback = el.requestVideoFrameCallback((_now, meta) => {
-        if (!el.seeking && Math.abs(meta.mediaTime - target) < 0.08) finish();
+        if (!el.seeking && Math.abs(meta.mediaTime - effectiveTarget()) < 0.08) finish();
       });
     }
     try { el.currentTime = target; } catch (e) { fail(String(e)); }
