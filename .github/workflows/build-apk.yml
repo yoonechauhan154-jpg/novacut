@@ -58,6 +58,10 @@ jobs:
         working-directory: ./android
         run: chmod +x gradlew
 
+      - name: Run Native Export Unit Tests
+        working-directory: ./android
+        run: ./gradlew testDebugUnitTest
+
       - name: Build Debug APK with Gradle
         working-directory: ./android
         run: ./gradlew assembleDebug
