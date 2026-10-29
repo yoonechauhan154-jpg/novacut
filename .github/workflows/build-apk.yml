@@ -30,6 +30,9 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Typecheck Editor
+        run: npm run lint
+
       - name: Build Offline Web Bundle
         env:
           VITE_BUILD_ID: ${{ github.sha }}
