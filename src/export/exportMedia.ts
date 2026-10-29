@@ -61,6 +61,10 @@ export async function loadVideo(el: HTMLVideoElement, src: string, cancel: Cance
 export async function seekVideo(el: HTMLVideoElement, target: number, cancel: CancelFlag, log: Diagnostic, timeout = 5000) {
   abortIfCancelled(cancel);
   el.pause();
+  if (!Number.isFinite(el.currentTime) || !Number.isFinite(target)) {
+    const detail = mediaDiagnostic(el, target, 'invalid media clock');
+    log('seek-failed', detail); throw new Error(detail);
+  }
   target = Math.max(0, Math.min(target, Number.isFinite(el.duration) ? Math.max(0, el.duration - 0.001) : target));
   if (!el.seeking && el.readyState >= 2 && Math.abs(el.currentTime - target) < 0.0005) return;
   await new Promise<void>((resolve, reject) => {

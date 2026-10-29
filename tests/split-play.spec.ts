@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
 
 test('play after split at 2s, after undo, and after two splits', async ({ page }) => {
+  page.on('response', response => {
+    if (response.status() >= 400) console.log('HTTP failure:', response.status(), response.url());
+  });
   const consoleErrors: string[] = [];
   page.on('console', (msg) => {
     if (msg.type() === 'error') consoleErrors.push(msg.text());

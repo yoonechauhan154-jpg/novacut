@@ -94,7 +94,7 @@ test('real split/join export has moving frames, timeline duration and audible au
   const file = resolve('test-exports/phase1-split-join.' + (output.mime.includes('mp4') ? 'mp4' : 'webm'));
   writeFileSync(file, Buffer.from(output.base64, 'base64'));
   const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-show_format', '-of', 'json', file], { encoding: 'utf8' }));
-  const video = probe.streams.find(s => s.codec_type === 'video'), audio = probe.streams.find(s => s.codec_type === 'audio');
+  const video = probe.streams.find((s: { codec_type: string }) => s.codec_type === 'video'), audio = probe.streams.find((s: { codec_type: string }) => s.codec_type === 'audio');
   expect(video).toBeTruthy(); expect(audio).toBeTruthy();
   expect(Number(probe.format.duration)).toBeGreaterThan(3.6); expect(Number(probe.format.duration)).toBeLessThan(4.5);
   expect(Number(video.nb_read_frames)).toBeGreaterThan(30);
