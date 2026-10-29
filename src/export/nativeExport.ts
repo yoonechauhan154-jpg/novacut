@@ -107,7 +107,15 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
       overlays.push({ path: await stage(await toBlob(), 'overlay-' + overlays.length + '.png'),
         start: clip.startTime, end: clip.startTime + clip.duration });
     };
-    for (const c of project.clips.filter(c => c.trackType === 'video' && !c.muted && c.adjustments.vignette > 0)) {
+    const vignetteRuns: TimelineClip[] = [];
+    for (const c of project.clips.filter(c => c.trackType === 'video' && !c.muted).sort((a, b) => a.startTime - b.startTime)) {
+      const previous = vignetteRuns[vignetteRuns.length - 1];
+      if (c.adjustments.vignette <= 0) continue;
+      if (previous && previous.adjustments.vignette === c.adjustments.vignette &&
+          Math.abs(previous.startTime + previous.duration - c.startTime) < .001) previous.duration += c.duration;
+      else vignetteRuns.push({ ...c });
+    }
+    for (const c of vignetteRuns) {
       ctx.clearRect(0, 0, width, height);
       const gradient = ctx.createRadialGradient(width / 2, height / 2, width * .25, width / 2, height / 2, width * .72);
       gradient.addColorStop(0, 'rgba(0,0,0,0)'); gradient.addColorStop(1, 'rgba(0,0,0,' + c.adjustments.vignette / 100 * .75 + ')');
@@ -124,7 +132,13 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
       await addOverlay(c);
     }
     listener = await NativeExporter.addListener('progress', e => progress(e.progress));
-    timer = setInterval(() => { if (cancel.current) void NativeExporter.cancel(); }, 100);
+    let cancellationSent = false;
+    timer = setInterval(() => {
+      if (cancel.current && !cancellationSent) {
+        cancellationSent = true;
+        void NativeExporter.cancel().catch(err => log('native-cancel', String(err)));
+      }
+    }, 100);
     abortIfCancelled(cancel);
     const result = await NativeExporter.exportVideo({ plan: {
       sources, overlays, width, height, fps: project.fps,

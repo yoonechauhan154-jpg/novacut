@@ -13,6 +13,7 @@ export const SUPPORTED_LANGUAGES: LanguageOption[] = [
 
 export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
   en: {
+    exportFramesRendered: 'Frames rendered',
     exportRecoveryMode: "Prefer Android exporter",
     exportRecoveryOn: "ON: use Android decoding first when available, preserving supported audio and edits.",
     exportRecoveryOff: "OFF: try WebView export, then Android fallback if it fails.",
@@ -202,6 +203,7 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     exportLogCopied: 'Export log copied to clipboard.',
   },
   hi: {
+    exportFramesRendered: 'रेंडर किए गए फ़्रेम',
     exportRecoveryMode: "Android एक्सपोर्टर को प्राथमिकता दें",
     exportRecoveryOn: "चालू: उपलब्ध होने पर पहले Android डिकोडिंग इस्तेमाल करें; समर्थित ऑडियो और एडिट बने रहेंगे।",
     exportRecoveryOff: "बंद: पहले WebView एक्सपोर्ट; विफल होने पर Android एक्सपोर्टर।",

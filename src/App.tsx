@@ -335,6 +335,7 @@ export function App() {
     resolution: string;
     duration: number;
     frames: number;
+    framesExact: boolean;
     size: number;
     hasAudio: boolean;
     verified: boolean;
@@ -2188,7 +2189,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       if (exportCancelledRef.current) return;
       setExportResult({
         format: result.format, resolution: result.resolution, duration: result.duration,
-        frames: result.frames, size: result.size, hasAudio: result.hasAudio,
+        frames: result.frames, framesExact: result.verification.frames > 0, size: result.size, hasAudio: result.hasAudio,
         verified: result.verification.ok, verificationError: result.verification.error,
       });
       if (result.native) {
@@ -5554,7 +5555,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                       <span className="font-mono text-amber-400">{exportResult.duration.toFixed(1)}s</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-slate-400">{t(lang, 'exportResultFrames')}</span>
+                      <span className="text-slate-400">{t(lang, exportResult.framesExact ? 'exportResultFrames' : 'exportFramesRendered')}</span>
                       <span className="font-mono text-amber-400">{exportResult.frames}</span>
                     </div>
                     <div className="flex justify-between">
