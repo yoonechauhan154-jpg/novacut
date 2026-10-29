@@ -3,13 +3,44 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-async function verifyExport(page: Page, id: string, label: string, info: TestInfo) {
-  const output = await page.evaluate(async (id) => {
+async function verifyExport(page: Page, id: string, label: string, info: TestInfo, saveGallery = false) {
+  const output = await page.evaluate(async ({ id, saveGallery }) => {
     const storagePath = '/src/utils/projectStorage.ts', exportPath = '/src/export/exportProject.ts';
     const { loadAllProjectsFromStorage, loadMediaBlobFromIdb } = await import(storagePath);
     const { exportProject } = await import(exportPath);
     const project = (await loadAllProjectsFromStorage()).find((p: { id: string }) => p.id === id);
-    const result = await exportProject(project, 'mp4', { current: false }, () => {});
+    const sourcesPath = '/src/utils/projectSources.ts';
+    const { resolveProjectSources } = await import(sourcesPath);
+    const lease = await resolveProjectSources(project, 'export', () => {});
+    const urls = lease.project.clips.map((c: { mediaUrl?: string }) => c.mediaUrl).filter(Boolean);
+    let result;
+    try {
+      result = await exportProject(project, 'mp4', { current: false }, () => {});
+      for (const url of urls) if (!(await fetch(url)).ok) throw new Error('Export invalidated a source handle');
+      if (saveGallery) {
+        const bridgePath = '/src/utils/androidBridge.ts'; const { saveToMediaStore } = await import(bridgePath);
+        const files = new Map<string, number>(), deleted: string[] = [];
+        const filesystem = {
+          writeFile: async ({ path, data }: { path: string; data: string }) => { files.set(path, atob(data).length); return { uri: 'file:///mock/cache/' + path }; },
+          appendFile: async ({ path, data }: { path: string; data: string }) => { files.set(path, (files.get(path) || 0) + atob(data).length); },
+          getUri: async ({ path }: { path: string }) => ({ uri: 'file:///mock/cache/' + path }),
+          deleteFile: async ({ path }: { path: string }) => {
+            if (!path.startsWith('clipnova-exports/') || !files.has(path)) throw new Error('Attempted source deletion');
+            deleted.push(path); files.delete(path);
+          },
+        };
+        const mediaSaver = {
+          saveVideo: async ({ path, expectedSize }: { path: string; expectedSize: number }) => {
+            if (files.get(path.replace('/mock/cache/', '')) !== expectedSize) throw new Error('Wrong gallery input');
+            return { uri: 'content://gallery/output', size: expectedSize, method: 'mediastore', relativePath: 'Movies/ClipNova/output', sdkInt: 35 };
+          },
+          verifySize: async ({ expectedSize }: { expectedSize: number }) => ({ verified: true, actualSize: expectedSize }),
+        };
+        const saved = await saveToMediaStore(result.blob, 'repeat.mp4', result.blob.type, { filesystem, mediaSaver, native: true });
+        if (!saved.saved || !saved.verified || deleted.length !== 1 || files.size) throw new Error('Gallery save/cleanup failed: ' + saved.error);
+        for (const url of urls) if (!(await fetch(url)).ok) throw new Error('Gallery cleanup invalidated source');
+      }
+    } finally { lease.release(); }
     const base64: string = await new Promise(resolve => {
       const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1]); r.readAsDataURL(result.blob);
     });
@@ -18,7 +49,7 @@ async function verifyExport(page: Page, id: string, label: string, info: TestInf
       return blob?.size || 0;
     }));
     return { base64, mime: result.blob.type, verification: result.verification, sources };
-  }, id);
+  }, { id, saveGallery });
   expect(output.verification.ok).toBe(true);
   expect(output.sources.every((size: number) => size > 0)).toBe(true);
   mkdirSync('test-exports', { recursive: true });
@@ -61,7 +92,8 @@ for (const decorated of [false, true]) {
       await saveProjectToStorage(project);
       return project.id;
     }, decorated);
-    for (let n = 1; n <= 3; n++) await verifyExport(page, id, id + '-export-' + n, info);
+    for (let n = 1; n <= 3; n++) await verifyExport(page, id, id + '-export-' + n, info, n === 3);
+    await verifyExport(page, id, id + '-after-gallery', info);
     await page.reload();
     await page.getByText('Repeat ' + decorated, { exact: true }).first().click();
     await expect(page.getByRole('button', { name: 'Play', exact: true }).first()).toBeVisible();
@@ -97,4 +129,58 @@ test('export resolves persisted bytes when the old import URL is no longer fetch
     return project.id;
   });
   await verifyExport(page, id, 'stale-handle', info);
+});
+
+test('source lease cleanup cannot revoke another owner or dispose a split source', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const presetsPath = '/src/data/presets.ts', storePath = '/src/utils/projectStorage.ts';
+    const sourcePath = '/src/utils/projectSources.ts', ownershipPath = '/src/utils/mediaOwnership.ts';
+    const { INITIAL_PROJECT, createBaseClip } = await import(presetsPath), { saveMediaBlobToIdb } = await import(storePath);
+    const { resolveProjectSources } = await import(sourcePath), { createOwnedMediaUrl, revokeOwnedMediaUrl, deleteExportTemp } = await import(ownershipPath);
+    const blob = new Blob(['durable-test-bytes'], { type: 'video/test' });
+    await saveMediaBlobToIdb('unit-source', blob);
+    const original = createOwnedMediaUrl(blob, 'unit-project');
+    const clip = createBaseClip({ id: 'unit', title: 'unit', startTime: 0, duration: 1, trackId: 'main', trackType: 'video',
+      sourceType: 'uploaded-video', mediaBlobId: 'unit-source', mediaUrl: original });
+    const project = { ...INITIAL_PROJECT, clips: [clip, { ...clip, id: 'unit-split-1', startTime: 1 }] };
+    const first = await resolveProjectSources(project, 'export', () => {}), second = await resolveProjectSources(project, 'export', () => {});
+    first.release();
+    const splitSharesSource = second.project.clips[0].mediaUrl === second.project.clips[1].mediaUrl;
+    revokeOwnedMediaUrl(original, 'wrong-export-owner');
+    const originalAlive = (await fetch(original)).ok;
+    const secondAlive = (await fetch(second.project.clips[1].mediaUrl)).ok;
+    let blocked = false;
+    try { await deleteExportTemp('clipnova-sources/unit.media', 'export'); } catch { blocked = true; }
+    second.release(); revokeOwnedMediaUrl(original, 'unit-project');
+    return { splitSharesSource, originalAlive, secondAlive, blocked };
+  });
+  expect(result).toEqual({ splitSharesSource: true, originalAlive: true, secondAlive: true, blocked: true });
+});
+
+test('missing source is shown on Home reopen and relink preserves split edits', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('clipnova_onboarding_done_v3', 'true'));
+  await page.goto('/');
+  await page.evaluate(async () => {
+    const presetsPath = '/src/data/presets.ts', storagePath = '/src/utils/projectStorage.ts';
+    const { INITIAL_PROJECT, createBaseClip } = await import(presetsPath), { saveProjectToStorage } = await import(storagePath);
+    const clip = createBaseClip({ id: 'missing', title: 'lost.webm', startTime: 0, duration: 1,
+      trackId: 'main', trackType: 'video', sourceType: 'uploaded-video', mediaBlobId: 'missing-bytes' });
+    await saveProjectToStorage({ ...INITIAL_PROJECT, id: 'missing-project', name: 'Relink test', importedMedia: [],
+      clips: [clip, { ...clip, id: 'missing-split-1', startTime: 1, sourceStart: 1, sourceEnd: 2, transitionIn: 'slide' }] });
+  });
+  await page.reload();
+  await page.getByText('Relink test', { exact: true }).first().click();
+  await expect(page.getByTestId('missing-sources')).toContainText('lost.webm');
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Relink', exact: true }).click();
+  const chooser = await chooserPromise; await chooser.setFiles('test-assets/test-12s.webm');
+  await expect(page.getByTestId('missing-sources')).toHaveCount(0);
+  const clips = await page.evaluate(async () => {
+    const path = '/src/utils/projectStorage.ts'; const { loadAllProjectsFromStorage } = await import(path);
+    return (await loadAllProjectsFromStorage()).find((p: { id: string }) => p.id === 'missing-project').clips;
+  });
+  expect(clips).toHaveLength(2);
+  expect(clips[0].mediaBlobId).toBe(clips[1].mediaBlobId);
+  expect(clips[1].sourceStart).toBe(1); expect(clips[1].transitionIn).toBe('slide');
 });

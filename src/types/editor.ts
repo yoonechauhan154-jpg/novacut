@@ -120,6 +120,9 @@ export interface ColorAdjustments {
 }
 
 export interface ImportedMediaItem {
+  originalName?: string;
+  size?: number;
+  mimeType?: string;
   id: string;
   name: string;
   kind: 'video' | 'image' | 'audio' | 'procedural';
@@ -132,6 +135,8 @@ export interface ImportedMediaItem {
 }
 
 export interface TimelineClip {
+  /** Resolved app-owned native source; never an export temporary file. */
+  mediaNativeUri?: string;
   id: string;
   trackId: string;
   trackType: TrackType;

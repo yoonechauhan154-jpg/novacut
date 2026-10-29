@@ -1,4 +1,7 @@
 import { ProjectData } from '../types/editor';
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
+import { auditMedia } from './mediaOwnership';
 
 const DB_NAME = 'clipnova_idb_v3';
 const DB_VERSION = 1;
@@ -38,35 +41,83 @@ export function isValidProjectData(item: unknown): item is ProjectData {
   );
 }
 
-export async function saveMediaBlobToIdb(blobId: string, blob: Blob): Promise<void> {
-  try {
-    const db = await openDatabase();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_BLOBS, 'readwrite');
-      tx.objectStore(STORE_BLOBS).put(blob, blobId);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    db.close();
-  } catch {
-    // Ignore IDB blob quota errors gracefully
-  }
+export interface StoredMedia {
+  version: 1; name: string; size: number; type: string; blob?: Blob; path?: string;
 }
-
-export async function loadMediaBlobFromIdb(blobId: string): Promise<Blob | null> {
+export async function loadMediaRecord(blobId: string): Promise<StoredMedia | null> {
+  const db = await openDatabase();
   try {
-    const db = await openDatabase();
-    const result = await new Promise<Blob | null>((resolve) => {
-      const tx = db.transaction(STORE_BLOBS, 'readonly');
-      const req = tx.objectStore(STORE_BLOBS).get(blobId);
-      req.onsuccess = () => resolve((req.result as Blob) || null);
-      req.onerror = () => resolve(null);
+    const value = await new Promise<Blob | StoredMedia | undefined>((resolve, reject) => {
+      const req = db.transaction(STORE_BLOBS, 'readonly').objectStore(STORE_BLOBS).get(blobId);
+      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
     });
-    db.close();
-    return result;
-  } catch {
-    return null;
+    // Old databases store a raw File/Blob. Keep them readable for migration/relink.
+    if (value instanceof Blob) return { version: 1, blob: value, size: value.size, type: value.type,
+      name: value instanceof File ? value.name : blobId };
+    return value || null;
+  } finally { db.close(); }
+}
+export async function saveMediaBlobToIdb(blobId: string, blob: Blob): Promise<void> {
+  if (!blob.size) throw new Error('Source file is empty');
+  const record: StoredMedia = { version: 1, name: blob instanceof File ? blob.name : blobId,
+    size: blob.size, type: blob.type };
+  const chunkSize = 1024 * 1024;
+  // Materialize bytes: a picker File can be backed by a temporary provider handle.
+  // Android owns a copy in Data, never Cache. Browser IDB owns detached byte chunks.
+  if (Capacitor.isNativePlatform()) {
+    record.path = 'clipnova-sources/' + crypto.randomUUID() + '.media';
+    try {
+      for (let offset = 0; offset < blob.size; offset += chunkSize) {
+        const chunk = new Blob([await blob.slice(offset, offset + chunkSize).arrayBuffer()]);
+        const data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader(); reader.onerror = () => reject(reader.error);
+          reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(chunk);
+        });
+        if (offset === 0) await Filesystem.writeFile({ path: record.path, directory: Directory.Data, data, recursive: true });
+        else await Filesystem.appendFile({ path: record.path, directory: Directory.Data, data });
+      }
+      const stat = await Filesystem.stat({ path: record.path, directory: Directory.Data });
+      if (stat.size !== blob.size) throw new Error('Durable source copy size mismatch');
+    } catch (error) {
+      try { await Filesystem.deleteFile({ path: record.path, directory: Directory.Data });
+        auditMedia('deleted', record.path, 'saveMediaBlobToIdb.failedNewCopy'); } catch {}
+      throw error;
+    }
+  } else {
+    const parts: ArrayBuffer[] = [];
+    for (let offset = 0; offset < blob.size; offset += chunkSize)
+      parts.push(await blob.slice(offset, offset + chunkSize).arrayBuffer());
+    record.blob = new Blob(parts, { type: blob.type });
+    try { await navigator.storage?.persist?.(); } catch {}
   }
+  let db: IDBDatabase | undefined;
+  try {
+    db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db!.transaction(STORE_BLOBS, 'readwrite');
+      tx.objectStore(STORE_BLOBS).put(record, blobId);
+      tx.oncomplete = () => resolve(); tx.onerror = tx.onabort = () => reject(tx.error || new Error('Source storage aborted'));
+    });
+    auditMedia('persisted', record.path || blobId, 'saveMediaBlobToIdb', record.name + ' bytes=' + record.size);
+  } catch (error) {
+    if (record.path) try { await Filesystem.deleteFile({ path: record.path, directory: Directory.Data });
+      auditMedia('deleted', record.path, 'saveMediaBlobToIdb.failedNewRecord'); } catch {}
+    throw error; // An import must not claim success without its durable bytes.
+  } finally { db?.close(); }
+}
+export async function loadMediaBlobFromIdb(blobId: string): Promise<Blob | null> {
+  const record = await loadMediaRecord(blobId);
+  if (!record) return null;
+  if (record.blob) return record.blob;
+  if (record.path) {
+    const uri = await Filesystem.getUri({ path: record.path, directory: Directory.Data });
+    const response = await fetch(Capacitor.convertFileSrc(uri.uri));
+    if (!response.ok) throw new Error('Stored source read failed: ' + response.status);
+    const blob = await response.blob();
+    if (blob.size !== record.size) throw new Error('Stored source size mismatch');
+    return blob.type === record.type ? blob : new Blob([blob], { type: record.type });
+  }
+  return null;
 }
 
 export async function loadAllProjectsFromStorage(

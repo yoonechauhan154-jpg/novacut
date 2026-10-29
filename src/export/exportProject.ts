@@ -1,3 +1,4 @@
+import { resolveProjectSources, MissingSourceError } from '../utils/projectSources';
 import { Capacitor } from '@capacitor/core';
 import type { ProjectData } from '../types/editor';
 import type { ExportOptions } from './exportEngine';
@@ -17,6 +18,7 @@ export interface VerifiedExport {
 export async function exportProject(project: ProjectData, format: 'mp4' | 'webm', cancel: CancelFlag,
   progress: (pct: number) => void, mode: 'auto' | 'native' = 'auto', preferNative = false): Promise<VerifiedExport> {
   clearExportLog(); trace('export-started', 'mode=' + mode);
+  let sourceLease: Awaited<ReturnType<typeof resolveProjectSources>> | undefined;
   const native = async (): Promise<VerifiedExport> => {
     logExport('fallback', 'Starting native Media3 export');
     const r = await exportNative(project, cancel, logExport, progress);
@@ -47,6 +49,9 @@ export async function exportProject(project: ProjectData, format: 'mp4' | 'webm'
       hasAudio: verification.hasAudio, verification };
   };
   try {
+    sourceLease = await resolveProjectSources(project, 'export', logExport, cancel);
+    if (sourceLease.missing.length) throw new MissingSourceError(sourceLease.missing);
+    project = sourceLease.project;
     let result: VerifiedExport;
     if (mode === 'native' || (preferNative && nativeExportAvailable())) result = await native();
     else {
@@ -67,5 +72,5 @@ export async function exportProject(project: ProjectData, format: 'mp4' | 'webm'
     logExport('export-error', err instanceof Error ? err.message : String(err));
     trace('export-finished', cancel.current ? 'cancelled' : 'failed');
     throw err;
-  }
+  } finally { sourceLease?.release(); }
 }

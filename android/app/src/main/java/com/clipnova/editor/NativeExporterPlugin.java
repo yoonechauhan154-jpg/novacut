@@ -67,7 +67,9 @@ public class NativeExporterPlugin extends Plugin {
   private File sourceFile(String uri) throws Exception {
     File file = new File(Uri.parse(uri).getPath()).getCanonicalFile();
     String cache = getContext().getCacheDir().getCanonicalPath() + "/clipnova-native-";
-    if (!file.getPath().startsWith(cache) || !file.isFile()) throw new Exception("Invalid staged export source");
+    String durable = getContext().getFilesDir().getCanonicalPath() + "/clipnova-sources/";
+    if ((!file.getPath().startsWith(cache) && !file.getPath().startsWith(durable)) || !file.isFile())
+      throw new Exception("Invalid export source");
     return file;
   }
   private boolean hasAudio(File file) throws Exception {

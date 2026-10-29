@@ -1,3 +1,4 @@
+import { createOwnedMediaUrl, revokeOwnedMediaUrl, deleteExportTemp } from './mediaOwnership';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -216,14 +217,14 @@ export async function saveAndShareFileOnDevice(
   }
 
   // Standard Web Browser Fallback
-  const url = URL.createObjectURL(blob);
+  const url = createOwnedMediaUrl(blob, 'saveAndShareFileOnDevice.download');
   const a = document.createElement('a');
   a.href = url;
   a.download = safeName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  setTimeout(() => revokeOwnedMediaUrl(url, 'saveAndShareFileOnDevice.download'), 5000);
   return { saved: true, savedPath: safeName, shared: false };
 }
 
@@ -240,13 +241,21 @@ export async function saveAndShareFileOnDevice(
  * the result carries the content URI, size, API level and method so the UI can
  * show an honest "Saved to Movies/ClipNova" dialog or an exact error.
  */
+export interface MediaSaveDependencies {
+  filesystem: Pick<typeof Filesystem, 'writeFile' | 'appendFile' | 'getUri' | 'deleteFile'>;
+  mediaSaver: Pick<MediaSaverPlugin, 'saveVideo' | 'verifySize'> | null;
+  native: boolean;
+}
+
 export async function saveToMediaStore(
   blob: Blob,
   fileName: string,
-  mimeType: string = 'video/mp4'
+  mimeType: string = 'video/mp4',
+  dependencies?: MediaSaveDependencies
 ): Promise<MediaSaveResult> {
   const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const cachePath = `clipnova-exports/${safeName}`;
+  const cachePath = `clipnova-exports/${crypto.randomUUID()}-${safeName}`;
+  const filesystem = dependencies?.filesystem || Filesystem;
   const result: MediaSaveResult = {
     saved: false,
     method: 'download',
@@ -258,8 +267,8 @@ export async function saveToMediaStore(
     error: null,
   };
 
-  const isNative = isAndroidNativeApp();
-  const MediaSaver = isNative ? getMediaSaverPlugin() : null;
+  const isNative = dependencies?.native ?? isAndroidNativeApp();
+  const MediaSaver = dependencies ? dependencies.mediaSaver : isNative ? getMediaSaverPlugin() : null;
 
   try {
     // 1. Write the blob to the app cache in 2 MiB base64 chunks.
@@ -270,7 +279,7 @@ export async function saveToMediaStore(
       const chunk = blob.slice(offset, Math.min(offset + CHUNK, blob.size));
       const base64 = await blobToBase64(chunk);
       if (first) {
-        await Filesystem.writeFile({
+        await filesystem.writeFile({
           path: cachePath,
           data: base64,
           directory: Directory.Cache,
@@ -278,7 +287,7 @@ export async function saveToMediaStore(
         });
         first = false;
       } else {
-        await Filesystem.appendFile({
+        await filesystem.appendFile({
           path: cachePath,
           data: base64,
           directory: Directory.Cache,
@@ -287,7 +296,7 @@ export async function saveToMediaStore(
       offset += chunk.size;
     }
 
-    const uriRes = await Filesystem.getUri({ path: cachePath, directory: Directory.Cache });
+    const uriRes = await filesystem.getUri({ path: cachePath, directory: Directory.Cache });
     const filePath = (uriRes.uri || '').replace(/^file:\/\//, '');
     if (!filePath) throw new Error('Could not resolve cache file path');
 
@@ -312,7 +321,7 @@ export async function saveToMediaStore(
 
       // 4. Remove the temp cache file.
       try {
-        await Filesystem.deleteFile({ path: cachePath, directory: Directory.Cache });
+        await deleteExportTemp(cachePath, 'saveToMediaStore.cleanup', filesystem);
       } catch {
         // ignore — temp file cleanup is best effort
       }
@@ -339,7 +348,7 @@ export async function saveToMediaStore(
     result.error = msg;
     result.saved = false;
     // Best-effort cleanup of the partial temp file.
-    try { await Filesystem.deleteFile({ path: cachePath, directory: Directory.Cache }); } catch {}
+    try { await deleteExportTemp(cachePath, 'saveToMediaStore.cleanup', filesystem); } catch {}
     return result;
   }
 }

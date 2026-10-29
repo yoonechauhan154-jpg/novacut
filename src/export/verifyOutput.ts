@@ -1,3 +1,4 @@
+import { createOwnedMediaUrl, revokeOwnedMediaUrl } from '../utils/mediaOwnership';
 import { attachExportVideo, loadVideo, seekVideo, type CancelFlag, type Diagnostic } from './exportMedia';
 
 export interface FileVerification {
@@ -50,7 +51,7 @@ export async function inspectMp4(blob: Blob) {
 export async function verifyOutput(blob: Blob, expectedDuration: number, expectAudio: boolean,
   expectMotion: boolean, cancel: CancelFlag, log: Diagnostic): Promise<FileVerification> {
   const result: FileVerification = { ok: false, duration: 0, frames: 0, hasAudio: false, framesChanging: false, error: null };
-  const url = URL.createObjectURL(blob), video = attachExportVideo('output-verification');
+  const url = createOwnedMediaUrl(blob, 'verifyOutput'), video = attachExportVideo('output-verification');
   try {
     if (!blob.size) throw new Error('Output is empty');
     if (blob.type.includes('mp4')) Object.assign(result, await inspectMp4(blob));
@@ -98,7 +99,7 @@ export async function verifyOutput(blob: Blob, expectedDuration: number, expectA
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err); log('verify-failed', JSON.stringify(result));
   } finally {
-    video.pause(); video.removeAttribute('src'); video.load(); video.remove(); URL.revokeObjectURL(url);
+    video.pause(); video.removeAttribute('src'); video.load(); video.remove(); revokeOwnedMediaUrl(url, 'verifyOutput');
   }
   return result;
 }

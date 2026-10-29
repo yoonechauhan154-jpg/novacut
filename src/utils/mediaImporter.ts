@@ -1,5 +1,6 @@
+import { createOwnedMediaUrl } from './mediaOwnership';
 import { ImportedMediaItem } from '../types/editor';
-import { saveMediaBlobToIdb } from './projectStorage';
+import { saveMediaBlobToIdb, loadMediaBlobFromIdb } from './projectStorage';
 
 export interface MediaImportFeedback {
   onStepToast: (msgEn: string, msgHi: string) => void;
@@ -41,9 +42,11 @@ export async function inspectAndImportMediaFile(
     `फ़ाइल चुनी गई: ${file.name} (${sizeMb} MB)`
   );
 
-  const objectUrl = URL.createObjectURL(file);
   const blobId = `blob-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   await saveMediaBlobToIdb(blobId, file);
+  const durable = await loadMediaBlobFromIdb(blobId);
+  if (!durable) throw new Error('Imported source was not persisted');
+  const objectUrl = createOwnedMediaUrl(durable, 'import:' + blobId);
 
   const isVideo =
     mime.startsWith('video/') ||
@@ -100,6 +103,7 @@ export async function inspectAndImportMediaFile(
           kind: 'video',
           mediaUrl: objectUrl,
           mediaBlobId: blobId,
+          originalName: file.name, size: file.size, mimeType: file.type,
           thumbnailUrl: thumbUrl || createPlaceholderThumbnail(cleanName, '#38BDF8'),
           duration: Number(Math.max(0.5, realDuration).toFixed(2)),
           createdAt: new Date().toISOString(),
@@ -179,6 +183,7 @@ export async function inspectAndImportMediaFile(
           kind: 'image',
           mediaUrl: objectUrl,
           mediaBlobId: blobId,
+          originalName: file.name, size: file.size, mimeType: file.type,
           thumbnailUrl: thumbUrl || objectUrl,
           duration: 3.0,
           createdAt: new Date().toISOString(),
@@ -253,6 +258,7 @@ export async function inspectAndImportMediaFile(
           kind: 'audio',
           mediaUrl: objectUrl,
           mediaBlobId: blobId,
+          originalName: file.name, size: file.size, mimeType: file.type,
           thumbnailUrl: createPlaceholderThumbnail(`🎵 ${cleanName}`, '#10B981'),
           duration: Number(Math.max(1.0, dur).toFixed(2)),
           createdAt: new Date().toISOString(),
@@ -290,6 +296,7 @@ export async function inspectAndImportMediaFile(
     kind: 'video',
     mediaUrl: objectUrl,
     mediaBlobId: blobId,
+          originalName: file.name, size: file.size, mimeType: file.type,
     thumbnailUrl: createPlaceholderThumbnail(cleanName, '#F59E0B'),
     duration: 5.0,
     createdAt: new Date().toISOString(),

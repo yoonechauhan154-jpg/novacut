@@ -35,7 +35,7 @@ import java.io.OutputStream;
  *
  * The caller (WebView) writes the blob into the app cache directory in chunks
  * and passes the cache file path here; this plugin copies it into MediaStore and
- * deletes the temp file. No base64 strings cross the bridge.
+ * leaves input cleanup to its caller. It never deletes a source file.
  */
 @CapacitorPlugin(name = "MediaSaver")
 public class MediaSaverPlugin extends Plugin {
@@ -58,7 +58,18 @@ public class MediaSaverPlugin extends Plugin {
       return;
     }
 
-    File src = new File(path);
+    final File src;
+    try {
+      src = new File(path).getCanonicalFile();
+      String exportRoot = new File(getContext().getCacheDir(), "clipnova-exports").getCanonicalPath() + File.separator;
+      if (!src.getPath().startsWith(exportRoot)) {
+        call.reject("MediaSaver accepts only export-owned cache files");
+        return;
+      }
+    } catch (IOException e) {
+      call.reject("Invalid export cache path", e);
+      return;
+    }
     if (!src.exists()) {
       call.reject("Source file not found: " + path);
       return;

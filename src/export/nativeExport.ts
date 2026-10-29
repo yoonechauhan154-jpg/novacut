@@ -1,3 +1,4 @@
+import { deleteExportTemp } from '../utils/mediaOwnership';
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import type { ProjectData, TimelineClip } from '../types/editor';
@@ -91,7 +92,7 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
     for (const c of project.clips.filter(c => !c.muted && ['video', 'audio'].includes(c.trackType))) {
       abortIfCancelled(cancel);
       if (!c.mediaUrl) throw new Error('Missing source: ' + c.title);
-      let path = paths.get(c.mediaUrl);
+      let path = c.mediaNativeUri || paths.get(c.mediaUrl);
       if (!path) {
         const response = await fetch(c.mediaUrl);
         if (!response.ok) throw new Error('Cannot read native source: ' + response.status);
@@ -158,7 +159,7 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
   } finally {
     if (timer) clearInterval(timer);
     await listener?.remove();
-    for (const path of staged) { try { await Filesystem.deleteFile({ path, directory: Directory.Cache }); } catch {} }
+    for (const path of staged) { try { await deleteExportTemp(path, 'exportNative.dispose'); } catch {} }
     try { await Filesystem.rmdir({ path: directory, directory: Directory.Cache }); } catch {}
   }
 }

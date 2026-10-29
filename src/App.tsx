@@ -1,3 +1,5 @@
+import { resolveProjectSources, relinkProjectSource, MissingSourceError, type MissingSource } from './utils/projectSources';
+import { createOwnedMediaUrl, revokeOwnedMediaUrl, getMediaAudit } from './utils/mediaOwnership';
 import { getMediaSaverPlugin } from './utils/androidBridge';
 import { exportProject } from './export/exportProject';
 import { nativeExportAvailable, type NativeResult } from './export/nativeExport';
@@ -90,6 +92,7 @@ import {
   probeWebCodecsSupport,
   checkResolutionSupported,
   getExportLog,
+  logExport,
   clearExportLog,
 } from './export/exportEngine';
 import { LanguageCode, SUPPORTED_LANGUAGES, t } from './i18n/translations';
@@ -132,7 +135,7 @@ import { inspectAndImportMediaFile } from './utils/mediaImporter';
 import {
   deleteProjectFromStorage,
   loadAllProjectsFromStorage,
-  loadMediaBlobFromIdb,
+  saveMediaBlobToIdb,
   saveProjectToStorage,
 } from './utils/projectStorage';
 import { soundEngine } from './utils/soundEngine';
@@ -324,6 +327,12 @@ export function App() {
   const [showExportModal, setShowExportModal] = useState<boolean>(false);
   const [showChecklistModal, setShowChecklistModal] = useState<boolean>(false);
   const exportBusyRef = useRef(false);
+  const [missingSources, setMissingSources] = useState<MissingSource[]>([]);
+  const [sourcesOpening, setSourcesOpening] = useState(false);
+  const sourceOpenGeneration = useRef(0);
+  const openSourceLeaseRef = useRef<Awaited<ReturnType<typeof resolveProjectSources>> | null>(null);
+  const relinkInputRef = useRef<HTMLInputElement | null>(null);
+  const relinkTargetRef = useRef<MissingSource | null>(null);
   const [exportFailure, setExportFailure] = useState<string | null>(null);
   const [nativeExportResult, setNativeExportResult] = useState<NativeResult | null>(null);
   const [isExportingVideo, setIsExportingVideo] = useState<boolean>(false);
@@ -582,13 +591,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
           (clip.sourceType === 'uploaded-video' || clip.sourceType === 'uploaded-image') &&
           !mediaElementsRef.current.has(clip.id)
         ) {
-          let url = clip.mediaUrl;
-          if (clip.mediaBlobId) {
-            const blob = await loadMediaBlobFromIdb(clip.mediaBlobId);
-            if (blob && active) {
-              url = URL.createObjectURL(blob);
-            }
-          }
+          // Project-open source resolution supplies the same fresh handle used by all preview paths.
+          const url = clip.mediaUrl;
           if (!url || !active) continue;
 
           if (clip.sourceType === 'uploaded-video') {
@@ -1164,23 +1168,45 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   // Check if first-time onboarding should show when entering Editor
-  const openEditorWithProject = (proj: ProjectData) => {
-    setProject(proj);
-    setHistoryPast([]);
-    setHistoryFuture([]);
-    setPlayheadTime(0);
-    setIsPlaying(false);
-    setActiveSheetTool(null);
-    setSelectedClipId(proj.clips[0]?.id || null);
-    setScreen('editor');
-
+  const clearPreviewMedia = () => {
+    for (const el of new Set([...mediaElementsRef.current.values(), ...audioElementsRef.current.values()])) {
+      if (el instanceof HTMLMediaElement) { el.pause(); el.removeAttribute('src'); el.load(); }
+      el.remove();
+    }
+    mediaElementsRef.current.clear(); audioElementsRef.current.clear();
+  };
+  const openEditorWithProject = async (proj: ProjectData) => {
+    const generation = ++sourceOpenGeneration.current;
+    setSourcesOpening(true); setIsPlaying(false); soundEngine.stopAllAudio();
     try {
-      const done = localStorage.getItem('clipnova_onboarding_done_v3');
-      if (!done) {
-        setOnboardingStep(1);
-      }
-    } catch {
-      // ignore
+      const lease = await resolveProjectSources(proj, 'open', logExport);
+      if (generation !== sourceOpenGeneration.current) { lease.release(); return; }
+      clearPreviewMedia();
+      openSourceLeaseRef.current?.release();
+      openSourceLeaseRef.current = lease;
+      setProject(lease.project);
+      setMissingSources(lease.missing);
+      setHistoryPast([]); setHistoryFuture([]); setPlayheadTime(0);
+      setActiveSheetTool(null); setSelectedClipId(proj.clips[0]?.id || null); setScreen('editor');
+      await saveProjectToStorage(lease.project);
+      try { if (!localStorage.getItem('clipnova_onboarding_done_v3')) setOnboardingStep(1); } catch {}
+    } catch (error) {
+      triggerToast('Source check failed: ' + String(error), 'स्रोत की जाँच विफल: ' + String(error));
+    } finally {
+      if (generation === sourceOpenGeneration.current) { setSourcesOpening(false); setExportLog(getExportLog()); }
+    }
+  };
+  const handleRelinkSource = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0], target = relinkTargetRef.current;
+    event.target.value = '';
+    if (!file || !target) return;
+    try {
+      const updated = await relinkProjectSource(project, target, file);
+      await saveProjectToStorage(updated);
+      await openEditorWithProject(updated);
+      triggerToast('Source relinked. Edits retained.', 'स्रोत दोबारा लिंक हुआ। संपादन सुरक्षित हैं।');
+    } catch (error) {
+      triggerToast('Relink failed: ' + String(error), 'दोबारा लिंक करना विफल: ' + String(error));
     }
   };
 
@@ -1982,6 +2008,14 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       const recordedUrl = await soundEngine.stopVoiceoverRecording();
       setIsRecordingVoice(false);
       const newId = `vo-${Date.now()}`;
+      let voiceBlobId: string | undefined;
+      if (recordedUrl) {
+        try {
+          const response = await fetch(recordedUrl); if (!response.ok) throw new Error('Voiceover source unreadable');
+          voiceBlobId = 'blob-' + crypto.randomUUID();
+          await saveMediaBlobToIdb(voiceBlobId, await response.blob());
+        } catch (error) { triggerToast('Voiceover storage failed: ' + String(error), 'वॉइसओवर सहेजना विफल: ' + String(error)); return; }
+      }
       const voClip = createBaseClip({
         id: newId,
         trackId: 'track-audio-main',
@@ -1991,6 +2025,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         duration: Math.max(2.0, recordingSeconds),
         sourceType: recordedUrl ? 'uploaded-audio' : 'synth-audio',
         mediaUrl: recordedUrl || undefined,
+        mediaBlobId: voiceBlobId,
         synthPreset: 'lofi-monsoon',
         beatMarkers: [0.5, 1.0, 1.5, 2.0],
       });
@@ -2166,7 +2201,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleStartVideoExport = async (mode: 'auto' | 'native' = 'auto') => {
-    if (exportBusyRef.current || labRunning) return;
+    if (exportBusyRef.current || labRunning || sourcesOpening) return;
     exportBusyRef.current = true;
     setIsPlaying(false);
     soundEngine.stopAllAudio();
@@ -2177,7 +2212,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     setExportProgress(0);
     setExportFailure(null);
     setNativeExportResult(null);
-    if (exportedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(exportedVideoUrl);
+    if (exportedVideoUrl?.startsWith('blob:')) revokeOwnedMediaUrl(exportedVideoUrl, 'App.exportResult');
     setExportedVideoUrl(null);
     setExportedVideoBlob(null);
     setExportResult(null);
@@ -2201,12 +2236,13 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         triggerToast(t(lang, 'exportNativeSaved'));
       } else if (result.blob) {
         setExportedVideoBlob(result.blob);
-        setExportedVideoUrl(URL.createObjectURL(result.blob));
+        setExportedVideoUrl(createOwnedMediaUrl(result.blob, 'App.exportResult'));
         triggerToast(t(lang, 'exportVerifiedReady'));
       }
     } catch (err) {
       if (!exportCancelledRef.current) {
         const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof MissingSourceError) setMissingSources(err.sources);
         setExportFailure(message);
         triggerToast(t(lang, 'exportFailure'));
       }
@@ -2416,7 +2452,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleCopyExportLog = () => {
-    const logText = getExportLog().map((e) => `[${new Date(e.ts).toISOString()}] ${e.step}: ${e.detail}`).join('\n');
+    const logText = getExportLog().map((e) => `[${new Date(e.ts).toISOString()}] ${e.step}: ${e.detail}`).join('\n') +
+      '\nMedia ownership audit:\n' + JSON.stringify(getMediaAudit(), null, 2);
     navigator.clipboard.writeText(logText).then(() => {
       triggerToast('Export log copied to clipboard.', 'एक्सपोर्ट लॉग क्लिपबोर्ड पर कॉपी किया गया।');
     });
@@ -2559,6 +2596,24 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         onChange={handleLutFileUpload}
         className="hidden"
       />
+
+      <input ref={relinkInputRef} type="file" className="hidden" data-testid="relink-source-input"
+        accept="video/*,audio/*,image/*" onChange={handleRelinkSource} />
+      {sourcesOpening && <div role="status" className="p-2 text-sm text-amber-300">
+        {lang === 'hi' ? 'स्रोत फ़ाइलों की जाँच हो रही है…' : 'Checking source files…'}
+      </div>}
+      {screen === 'editor' && missingSources.length > 0 && (
+        <div role="alert" data-testid="missing-sources" className="p-3 border border-rose-400 rounded-xl bg-slate-950 text-rose-200 space-y-2">
+          {missingSources.map(source => <div key={source.key} className="flex items-center gap-2">
+            <span className="flex-1 text-sm">{lang === 'hi'
+              ? 'स्रोत गायब है: ' + source.name + '। दोबारा लिंक करें'
+              : 'Source ' + source.kind + ' missing: ' + source.name + '. Tap to relink'}</span>
+            <button type="button" className="min-h-[44px] px-3 border rounded" onClick={() => {
+              relinkTargetRef.current = source; relinkInputRef.current?.click();
+            }}>{lang === 'hi' ? 'दोबारा लिंक करें' : 'Relink'}</button>
+          </div>)}
+        </div>
+      )}
 
       {/* Step-by-Step Toast Notification */}
       {toastMessage && (
