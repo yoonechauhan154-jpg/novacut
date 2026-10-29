@@ -25,6 +25,14 @@ Native gallery publishing currently requires Android 10 or later. Overlay bitmap
 
 Six-frame motion sampling is evidence at sampled timestamps, not proof of every frame. An imported video that is intentionally visually static can be rejected as unverified. A WebView process kill cannot be caught by JavaScript in the same run; recovery prefers native on the next launch.
 
+## Phone report follow-up: end-of-source frame capture
+
+The first phone retest reached frame 400/414, then timed out requesting source time 13.633333 while the media element had reached its 13.798125-second end. This is evidence that end-of-source callback handling was incomplete; it is not a successful phone export.
+
+The follow-up seeks directly near the source tail or when the decoder has passed the target, and handles an ended event or missing playback callback with one bounded seek to the requested time. It does not accept the last frame as a substitute for the requested frame. Cancellation and failed recovery seeks still abort. Native compatibility errors now list the exact blocking fields (for example transitionIn=fade or keyframes=1); the old generic message cannot identify which edit caused this report.
+
+Retest the **same saved project, retaining all edits**, with normal MP4 at 1080p/30fps. Confirm it completes, the last second moves correctly, total duration is about 13.8 seconds, audio remains synchronized, and the saved file opens from My exports/Gallery. If it fails, copy the complete new diagnostics and Settings build ID. Test native baseline separately with an unanimated split/join project; do not remove edits from the failing project to hide this regression.
+
 ## Automated verification
 
 The PR's GitHub Actions checks are authoritative for each commit; see the PR description for the exact final run and result.
@@ -33,6 +41,7 @@ The PR's GitHub Actions checks are authoritative for each commit; see the PR des
 - Existing test assertion messages moved to Playwright's supported argument position; thresholds/assertions remain intact.
 - Added seek-event ordering, decoder timeout diagnostics, split decoder isolation and cancellation cleanup checks.
 - Added Settings-independent T1/T2 lab checks.
+- Added simulated already-ended playback, an ended-event race, missing callbacks, cancellation and failed-seek recovery checks, plus an actual WebCodecs export of the final second of a source (30 decoded frames checked with ffprobe).
 - Added a real split/join/speed export checked by ffprobe (duration, video frame count, audio stream) and ffmpeg (changing decoded frames and nonzero PCM audio).
 - Added a direct WebCodecs MP4 sample-table check for timestamps and frame count. It skips only when headless Chromium reports no H.264 encoder, with the reason shown.
 - Added native volume/fade endpoint unit tests; Android Java compilation and APK assembly include the plugin.

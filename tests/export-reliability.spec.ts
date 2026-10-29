@@ -30,6 +30,84 @@ test('export seeks attach listeners before currentTime and report a timed-out de
   for (const key of ['srcType', 'networkState', 'error', 'seekable', 'buffered']) expect(result.diagnostic).toHaveProperty(key);
 });
 
+test('export recovers EOF and missing playback callbacks by seeking the requested frame', async ({ page }) => {
+  await page.goto('/');
+  const results = await page.evaluate(async () => {
+    const path = '/src/export/exportMedia.ts';
+    const { attachExportVideo, advanceVideo } = await import(path);
+    const results = [];
+    for (const scenario of ['already-ended', 'ends-during-play', 'callback-stall']) {
+      const video = attachExportVideo(scenario);
+      const target = 13.633333333333333;
+      let time = scenario === 'already-ended' ? 13.798125 : 13.6;
+      let ended = scenario === 'already-ended', playCalls = 0, seeks = 0, id = 0;
+      const pending = new Set<number>(), diagnostics: string[] = [];
+      Object.defineProperty(video, 'duration', { get: () => scenario === 'already-ended' ? 13.798125 : 20 });
+      Object.defineProperty(video, 'readyState', { get: () => 4 });
+      Object.defineProperty(video, 'ended', { get: () => ended });
+      Object.defineProperty(video, 'currentTime', { get: () => time, set: value => {
+        seeks++; time = value; ended = false; video.dispatchEvent(new Event('seeked'));
+      } });
+      video.requestVideoFrameCallback = () => { pending.add(++id); return id; };
+      video.cancelVideoFrameCallback = callback => { pending.delete(callback); };
+      video.play = async () => {
+        playCalls++;
+        if (scenario === 'ends-during-play') { time = 20; ended = true; video.dispatchEvent(new Event('ended')); }
+      };
+      video.dataset.exportTime = '13.6';
+      try {
+        await advanceVideo(video, target, 30, { current: false },
+          (step: string, detail: string) => diagnostics.push(step + ':' + detail), 75);
+        results.push({ scenario, time, seeks, playCalls, pending: pending.size, diagnostics });
+      } finally { video.remove(); }
+    }
+    return results;
+  });
+  for (const result of results) {
+    expect(result.time).toBeCloseTo(13.633333333333333, 8);
+    expect(result.seeks).toBe(1);
+    expect(result.pending).toBe(0);
+    expect(result.playCalls).toBe(result.scenario === 'already-ended' ? 0 : 1);
+    if (result.scenario !== 'already-ended') expect(result.diagnostics.join('\n')).toContain('frame-recovery');
+  }
+});
+
+test('playback recovery still rejects cancellation and an undecodable requested frame', async ({ page }) => {
+  await page.goto('/');
+  const results = await page.evaluate(async () => {
+    const path = '/src/export/exportMedia.ts';
+    const { attachExportVideo, advanceVideo } = await import(path);
+    const results = [];
+    for (const scenario of ['cancel', 'failed-seek']) {
+      const video = attachExportVideo(scenario), cancel = { current: false };
+      let id = 0, seeks = 0;
+      const pending = new Set<number>(), diagnostics: string[] = [];
+      Object.defineProperty(video, 'readyState', { get: () => 4 });
+      Object.defineProperty(video, 'duration', { get: () => 20 });
+      Object.defineProperty(video, 'currentTime', { get: () => 1, set: () => { seeks++; } });
+      video.requestVideoFrameCallback = () => { pending.add(++id); return id; };
+      video.cancelVideoFrameCallback = callback => { pending.delete(callback); };
+      video.play = async () => { if (scenario === 'cancel') cancel.current = true; };
+      video.dataset.exportTime = '1';
+      let error = '';
+      try { await advanceVideo(video, 1.033333, 30, cancel,
+        (_step: string, detail: string) => diagnostics.push(detail), 75); }
+      catch (e) { error = e instanceof Error ? e.name + ':' + e.message : String(e); }
+      finally { video.remove(); }
+      results.push({ scenario, error, seeks, pending: pending.size, exportTime: video.dataset.exportTime, diagnostics });
+    }
+    return results;
+  });
+  expect(results[0].error).toContain('AbortError');
+  expect(results[0].seeks).toBe(0);
+  expect(results[1].error).toContain('seek timeout');
+  expect(results[1].seeks).toBe(1);
+  for (const result of results) {
+    expect(result.pending).toBe(0);
+    expect(result.exportTime).toBe('1');
+  }
+});
+
 test('split clips have independent export decoders and dispose after cancellation', async ({ page }) => {
   await page.goto('/');
   const result = await page.evaluate(async () => {
@@ -124,26 +202,33 @@ test('native compatibility rejects edits it cannot preserve', async ({ page }) =
     return {
       baseline: nativeUnsupported(project),
       effect: nativeUnsupported({ ...project, clips: [{ ...clip, effect: 'glitch' }] }),
+      keyframes: nativeUnsupported({ ...project, clips: [{ ...clip, keyframes: [{ id: 'k', timeOffset: 0,
+        scale: 1, x: 0, y: 0, rotation: 0, opacity: 1, easing: 'linear' }] }] }),
+      transition: nativeUnsupported({ ...project, clips: [{ ...clip, transitionIn: 'fade' }] }),
       gap: nativeUnsupported({ ...project, clips: [{ ...clip, startTime: 1 }] }),
       pip: nativeUnsupported({ ...project, clips: [clip, { ...clip, id: 'pip', trackType: 'overlay' }] }),
     };
   });
   expect(result.baseline).toEqual([]);
+  expect(result.effect.join(';')).toContain('effect=glitch');
+  expect(result.keyframes.join(';')).toContain('keyframes=1');
+  expect(result.transition.join(';')).toContain('transitionIn=fade');
   expect(result.effect.length).toBeGreaterThan(0); expect(result.gap.length).toBeGreaterThan(0); expect(result.pip.length).toBeGreaterThan(0);
 });
 
-test('WebCodecs MP4 has microsecond timestamps and decoder configuration', async ({ page }, testInfo) => {
+for (const sourceStart of [0, 9]) {
+test('WebCodecs MP4 decodes every frame at source offset ' + sourceStart, async ({ page }, testInfo) => {
   test.setTimeout(60000);
   await page.goto('/');
   const supported = await page.evaluate(async () => typeof VideoEncoder !== 'undefined' &&
     (await VideoEncoder.isConfigSupported({ codec: 'avc1.420028', width: 816, height: 460, framerate: 30, bitrate: 1000000 })).supported);
   test.skip(!supported, 'This headless Chromium has no H.264 VideoEncoder; the real browser recorder export is tested separately.');
-  const output = await page.evaluate(async () => {
+  const output = await page.evaluate(async (sourceStart) => {
     const enginePath = '/src/export/webCodecsExport.ts', presetsPath = '/src/data/presets.ts', verifyPath = '/src/export/verifyOutput.ts';
     const { encodeWebCodecs } = await import(enginePath), { INITIAL_PROJECT, createBaseClip } = await import(presetsPath);
     const { inspectMp4, verifyOutput } = await import(verifyPath);
     const clip = createBaseClip({ id: 'decoded-video', trackId: 'main', trackType: 'video', title: 'decoded moving source',
-      startTime: 0, duration: 1, sourceType: 'uploaded-video', mediaUrl: '/test-assets/test-12s.webm' });
+      startTime: 0, duration: 1, sourceStart, sourceEnd: sourceStart + 1, sourceType: 'uploaded-video', mediaUrl: '/test-assets/test-12s.webm' });
     let blob: Blob | undefined;
     await encodeWebCodecs({ project: { ...INITIAL_PROJECT, aspectRatio: '16:9', resolution: '480p', fps: 30, clips: [clip] },
       canvas: document.createElement('canvas'), mediaElementCache: new Map(), audioElementsRef: new Map(),
@@ -154,15 +239,16 @@ test('WebCodecs MP4 has microsecond timestamps and decoder configuration', async
     const base64: string = await new Promise(resolve => { const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(blob!); });
     return { ...metadata, verification, base64 };
-  });
+  }, sourceStart);
   expect(output.frames).toBe(30);
   expect(output.duration).toBeCloseTo(1, 1);
   expect(output.hasAudio).toBe(false);
   expect(output.verification.ok, output.verification.error || '').toBe(true);
   mkdirSync('test-exports', { recursive: true });
-  const mp4 = resolve('test-exports/phase1-webcodecs.mp4');
+  const mp4 = resolve('test-exports/phase1-webcodecs-' + sourceStart + '.mp4');
   writeFileSync(mp4, Buffer.from(output.base64, 'base64'));
   const decoded = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-of', 'json', mp4], { encoding: 'utf8' }));
   expect(Number(decoded.streams[0].nb_read_frames)).toBe(30);
   await testInfo.attach('mp4-sample-table', { body: JSON.stringify({ frames: output.frames, duration: output.duration, verification: output.verification }), contentType: 'application/json' });
 });
+}

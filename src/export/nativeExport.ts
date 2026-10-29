@@ -33,9 +33,15 @@ export function nativeUnsupported(project: ProjectData): string[] {
     if (!(base || audio || staticOverlay)) reasons.push('Unsupported native layer: ' + label);
     if (base && !['uploaded-video', 'uploaded-image'].includes(c.sourceType)) reasons.push('Procedural source: ' + label);
     if (audio && c.sourceType !== 'uploaded-audio') reasons.push('Synthetic audio: ' + label);
-    if (c.reversed || c.frozen || c.speedCurve !== 'normal' || c.keyframes.length ||
-        c.effect !== 'none' || c.transitionIn !== 'none' || c.motionTrackTargetId)
-      reasons.push('Animated edit: ' + label);
+    const animated: string[] = [];
+    if (c.reversed) animated.push('reversed=true');
+    if (c.frozen) animated.push('frozen=true');
+    if (c.speedCurve !== 'normal') animated.push('speedCurve=' + c.speedCurve);
+    if (c.keyframes.length) animated.push('keyframes=' + c.keyframes.length);
+    if (c.effect !== 'none') animated.push('effect=' + c.effect);
+    if (c.transitionIn !== 'none') animated.push('transitionIn=' + c.transitionIn);
+    if (c.motionTrackTargetId) animated.push('motionTrackTargetId=' + c.motionTrackTargetId);
+    if (animated.length) reasons.push('Animated edit: ' + label + ' [' + animated.join(', ') + ']');
     if (audio && (c.voiceChanger && c.voiceChanger !== 'none' || c.noiseReduction)) reasons.push('Audio processing: ' + label);
     if (base) {
       if (c.rotation || c.flipH || c.flipV || c.scale !== 1 || c.posX || c.posY || c.opacity !== 1 ||

@@ -14,7 +14,7 @@ export function mediaDiagnostic(el: HTMLVideoElement, target: number, reason: st
     attached: el.isConnected, readyState: el.readyState, networkState: el.networkState,
     error: el.error && { code: el.error.code, message: el.error.message },
     seekable: ranges(el.seekable), buffered: ranges(el.buffered), seeking: el.seeking,
-    currentTime: el.currentTime, target, duration: el.duration, paused: el.paused,
+    currentTime: el.currentTime, target, duration: el.duration, paused: el.paused, ended: el.ended,
     width: el.videoWidth, height: el.videoHeight,
   });
 }
@@ -105,39 +105,60 @@ export async function seekVideo(el: HTMLVideoElement, target: number, cancel: Ca
 }
 
 /** Consecutive forward frames use decoder playback, with seeks only for cuts/discontinuities. */
-export async function advanceVideo(el: HTMLVideoElement, target: number, fps: number, cancel: CancelFlag, log: Diagnostic) {
+export async function advanceVideo(el: HTMLVideoElement, target: number, fps: number, cancel: CancelFlag, log: Diagnostic, timeout = 5000) {
   abortIfCancelled(cancel);
   const previous = Number(el.dataset.exportTime ?? NaN);
+  // There may be no later presentation callback at EOF, especially with VFR footage.
+  // Also rewind before playback if the decoder clock has already passed this output slot.
+  const nearEnd = Number.isFinite(el.duration) && target >= el.duration - Math.max(.25, 3 / fps);
   if (!Number.isFinite(previous) || target < previous || target - previous > 0.5 ||
+      !Number.isFinite(el.currentTime) || el.currentTime >= target || el.ended || nearEnd ||
       typeof el.requestVideoFrameCallback !== 'function') {
-    await seekVideo(el, target, cancel, log);
+    await seekVideo(el, target, cancel, log, timeout);
   } else if (target > previous + 0.0001) {
-    await new Promise<void>((resolve, reject) => {
+    const recovery = await new Promise<boolean>((resolve, reject) => {
       let callback = 0, settled = false;
-      const finish = (err?: Error) => {
+      const finish = (recover: boolean, err?: Error) => {
         if (settled) return; settled = true; clearInterval(timer);
+        el.removeEventListener('ended', onEnded);
+        el.removeEventListener('error', onError);
         if (callback) el.cancelVideoFrameCallback(callback);
-        el.pause(); err ? reject(err) : resolve();
+        el.pause(); err ? reject(err) : resolve(recover);
       };
-      const deadline = performance.now() + 5000;
+      const recover = (reason: string) => {
+        if (settled) return;
+        log('frame-recovery', mediaDiagnostic(el, target, reason));
+        finish(true);
+      };
+      const onEnded = () => recover('playback ended before requested frame callback; seeking requested time');
+      const onError = () => {
+        const detail = mediaDiagnostic(el, target, 'decoder error');
+        log('seek-failed', detail); finish(false, new Error(detail));
+      };
+      const deadline = performance.now() + timeout;
       const timer = setInterval(() => {
-        if (cancel.current) finish(new DOMException('Export cancelled', 'AbortError'));
-        else if (performance.now() > deadline) {
-          const detail = mediaDiagnostic(el, target, 'playback frame timeout');
-          log('seek-failed', detail); finish(new Error(detail));
-        }
+        if (cancel.current) finish(false, new DOMException('Export cancelled', 'AbortError'));
+        else if (el.ended) onEnded();
+        else if (performance.now() > deadline) recover('playback frame timeout; seeking requested time');
       }, 25);
       const frame: VideoFrameRequestCallback = (_now, meta) => {
-        if (meta.mediaTime >= target - 0.5 / fps) finish();
+        if (settled) return;
+        if (cancel.current) { finish(false, new DOMException('Export cancelled', 'AbortError')); return; }
+        if (meta.mediaTime >= target - 0.5 / fps) finish(false);
         else callback = el.requestVideoFrameCallback(frame);
       };
+      el.addEventListener('ended', onEnded);
+      el.addEventListener('error', onError);
       callback = el.requestVideoFrameCallback(frame);
       el.playbackRate = 1;
-      void el.play().catch(err => finish(err));
+      void el.play().catch(err => finish(false, err));
     });
-    // Slow JavaScript/decoder scheduling may overshoot. Never encode an unrelated future frame.
-    if (Math.abs(el.currentTime - target) > Math.max(0.08, 2 / fps)) await seekVideo(el, target, cancel, log);
+    // A recovery is one bounded seek, not permission to reuse a stale final frame.
+    // Failure or cancellation in that seek still aborts the export with diagnostics.
+    if (recovery || Math.abs(el.currentTime - target) > Math.max(0.08, 2 / fps))
+      await seekVideo(el, target, cancel, log, timeout);
   }
+  abortIfCancelled(cancel);
   el.dataset.exportTime = String(target);
 }
 
