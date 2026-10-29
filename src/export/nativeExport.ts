@@ -1,4 +1,4 @@
-import { deleteExportTemp } from '../utils/mediaOwnership';
+import { deleteExportTemp, auditMedia } from '../utils/mediaOwnership';
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import type { ProjectData, TimelineClip } from '../types/editor';
@@ -12,6 +12,7 @@ export interface NativeResult {
 interface NativeExportPlugin {
   exportVideo(options: { plan: unknown }): Promise<NativeResult>;
   cancel(): Promise<void>;
+  getCleanupLog(): Promise<{ events: { action: string; resource: string; owner: string; ts: number }[] }>;
   addListener(event: 'progress', cb: (event: { progress: number }) => void): Promise<PluginListenerHandle>;
 }
 const NativeExporter = registerPlugin<NativeExportPlugin>('NativeExporter');
@@ -158,6 +159,11 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
     log('native-verified', JSON.stringify(result)); return result;
   } finally {
     if (timer) clearInterval(timer);
+    try {
+      const audit = await NativeExporter.getCleanupLog();
+      for (const entry of audit.events) auditMedia(entry.action, entry.resource, entry.owner, 'nativeTs=' + entry.ts);
+      log('native-cleanup', JSON.stringify(audit.events));
+    } catch (error) { log('native-cleanup', String(error)); }
     await listener?.remove();
     for (const path of staged) { try { await deleteExportTemp(path, 'exportNative.dispose'); } catch {} }
     try { await Filesystem.rmdir({ path: directory, directory: Directory.Cache }); } catch {}

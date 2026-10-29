@@ -196,7 +196,7 @@ public class NativeExporterPlugin extends Plugin {
                 Uri uri = publish(output, name);
                 verified.put("uri", uri.toString()); verified.put("name", name);
                 main.post(() -> {
-                  if (activeCall == call) { call.resolve(verified); cleanup(); }
+                  if (activeCall == call) { cleanup(); call.resolve(verified); }
                 });
               } catch (Exception e) { main.post(() -> fail(call, e)); }
             });
@@ -251,7 +251,10 @@ public class NativeExporterPlugin extends Plugin {
       ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0);
       if (getContext().getContentResolver().update(uri, done, null, null) != 1) throw new Exception("MediaStore publish failed");
       committed = true; return uri;
-    } finally { if (!committed) getContext().getContentResolver().delete(uri, null, null); }
+    } finally { if (!committed) {
+      int removed = getContext().getContentResolver().delete(uri, null, null);
+      recordCleanup(uri.toString(), "NativeExporter.publish.rollback", removed > 0);
+    } }
   }
 
   @PluginMethod public void cancel(PluginCall call) {
@@ -267,14 +270,33 @@ public class NativeExporterPlugin extends Plugin {
   }
   private void fail(PluginCall call, Exception e) {
     if (activeCall != call) return;
-    call.reject("Native export: " + e.getMessage(), e); cleanup();
+    cleanup(); call.reject("Native export: " + e.getMessage(), e);
+  }
+  private synchronized void recordCleanup(String path, String owner, boolean deleted) {
+    try {
+      android.content.SharedPreferences prefs = getContext().getSharedPreferences("clipnova_media_cleanup", 0);
+      org.json.JSONArray old = new org.json.JSONArray(prefs.getString("events", "[]"));
+      org.json.JSONArray events = new org.json.JSONArray();
+      for (int i = Math.max(0, old.length() - 63); i < old.length(); i++) events.put(old.get(i));
+      org.json.JSONObject event = new org.json.JSONObject();
+      event.put("resource", path); event.put("owner", owner);
+      event.put("action", deleted ? "deleted" : "delete-failed"); event.put("ts", System.currentTimeMillis());
+      events.put(event); prefs.edit().putString("events", events.toString()).apply();
+    } catch (Exception ignored) {}
+  }
+  @PluginMethod public void getCleanupLog(PluginCall call) {
+    try {
+      JSObject result = new JSObject();
+      result.put("events", new org.json.JSONArray(getContext().getSharedPreferences("clipnova_media_cleanup", 0).getString("events", "[]")));
+      call.resolve(result);
+    } catch (Exception e) { call.reject("Cleanup log unavailable", e); }
   }
   private void cleanup() {
     if (progressPoll != null) main.removeCallbacks(progressPoll);
     if (transformer != null) { transformer.cancel(); transformer = null; }
     for (Bitmap bitmap : bitmaps) if (!bitmap.isRecycled()) bitmap.recycle();
     bitmaps.clear();
-    if (output != null) { output.delete(); output = null; }
+    if (output != null) { recordCleanup(output.getPath(), "NativeExporter.cleanup", output.delete()); output = null; }
     activeCall = null;
   }
   @Override protected void handleOnDestroy() {
