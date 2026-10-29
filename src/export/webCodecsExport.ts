@@ -19,7 +19,7 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
     framerate: project.fps, latencyMode: 'realtime', avc: { format: 'avc' },
   };
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error('H.264 encoder does not support the requested dimensions');
-  const resources = await createExportMedia(project, cancelRef, log);
+  const resources = await createExportMedia(project, cancelRef, log, true);
   let encoder: VideoEncoder | undefined;
   let audioEncoder: AudioEncoder | undefined;
   let encoderError: Error | undefined;
@@ -52,6 +52,7 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
     for (let i = 0; i < totalFrames; i++) {
       check();
       const time = i / project.fps;
+      await resources.prepare(time);
       for (const clip of project.clips) {
         if (time < clip.startTime || time >= clip.startTime + clip.duration || clip.muted) continue;
         const el = resources.media.get(clip.id);

@@ -150,7 +150,8 @@ public class NativeExporterPlugin extends Plugin {
           }
           List<TextureOverlay> overlays = new ArrayList<>();
           JSONArray overlaySpecs = plan.getJSONArray("overlays");
-          if (overlaySpecs.length() > 32) throw new Exception("Native overlay memory limit: 32");
+          if ((long) overlaySpecs.length() * width * height * 4 > 32L * 1024 * 1024)
+            throw new Exception("Native overlay bitmap memory limit (32 MB)");
           for (int i = 0; i < overlaySpecs.length(); i++) {
             JSONObject spec = overlaySpecs.getJSONObject(i);
             Bitmap bitmap = BitmapFactory.decodeFile(sourceFile(spec.getString("path")).getPath());

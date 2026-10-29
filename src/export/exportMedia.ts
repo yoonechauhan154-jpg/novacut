@@ -146,7 +146,7 @@ export function clipSourceTime(clip: TimelineClip, time: number, sourceDuration:
   return Math.max(0, Math.min(source, Math.max(0, sourceDuration - 0.001)));
 }
 
-export async function createExportMedia(project: ProjectData, cancel: CancelFlag, log: Diagnostic) {
+export async function createExportMedia(project: ProjectData, cancel: CancelFlag, log: Diagnostic, lazy = false) {
   const media = new Map<string, HTMLVideoElement | HTMLImageElement>();
   const audio = new Map<string, HTMLAudioElement>();
   const dispose = () => {
@@ -163,14 +163,25 @@ export async function createExportMedia(project: ProjectData, cancel: CancelFlag
       if (!clip.mediaUrl) continue;
       if (clip.sourceType === 'uploaded-video') {
         const el = attachExportVideo(clip.id); media.set(clip.id, el);
-        await loadVideo(el, clip.mediaUrl, cancel, log);
+        if (!lazy) await loadVideo(el, clip.mediaUrl, cancel, log);
       } else if (clip.sourceType === 'uploaded-image') {
         const el = new Image(); media.set(clip.id, el); el.src = clip.mediaUrl;
         await Promise.race([el.decode(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Image decode timeout')), 15000))]);
       } else if (clip.sourceType === 'uploaded-audio') {
-        const el = new Audio(); el.src = clip.mediaUrl; audio.set(clip.id, el);
+        const el = new Audio(); el.preload = 'none'; el.src = clip.mediaUrl; audio.set(clip.id, el);
       }
     }
-    return { media, audio, dispose };
+    const prepare = async (time: number) => {
+      for (const clip of project.clips) {
+        const el = media.get(clip.id);
+        if (!(el instanceof HTMLVideoElement) || !clip.mediaUrl) continue;
+        const active = !clip.muted && time >= clip.startTime && time < clip.startTime + clip.duration;
+        if (active && !el.getAttribute('src')) await loadVideo(el, clip.mediaUrl, cancel, log);
+        else if (!active && el.getAttribute('src')) {
+          el.pause(); el.removeAttribute('src'); el.load(); delete el.dataset.exportTime;
+        }
+      }
+    };
+    return { media, audio, dispose, prepare };
   } catch (err) { dispose(); throw err; }
 }

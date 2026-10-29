@@ -8,7 +8,7 @@ export async function encodeRecorder(opts: ExportOptions, log: (step: string, de
   const { project, cancelRef } = opts;
   const duration = Math.max(0, ...project.clips.map(c => c.startTime + c.duration));
   if (!duration || duration > 180) throw new Error('Browser recorder supports timelines up to 180 seconds');
-  const resources = await createExportMedia(project, cancelRef, log);
+  const resources = await createExportMedia(project, cancelRef, log, true);
   const canvas = document.createElement('canvas');
   Object.assign(canvas, getAspectDimensions(project.aspectRatio, 'export-full', project.resolution));
   const ctx = canvas.getContext('2d')!;
@@ -42,6 +42,7 @@ export async function encodeRecorder(opts: ExportOptions, log: (step: string, de
     void stopped.catch(() => {});
     const active = new Set<string>();
     const draw = async (time: number) => {
+      await resources.prepare(time);
       for (const clip of project.clips) {
         const el = resources.media.get(clip.id);
         if (!(el instanceof HTMLVideoElement)) continue;

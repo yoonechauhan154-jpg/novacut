@@ -199,89 +199,31 @@ export async function checkResolutionSupported(
 /*  Offline audio rendering + AAC encoding                            */
 /* ------------------------------------------------------------------ */
 
-/**
- * Fetch an ArrayBuffer from a media URL (blob URL or http).
- */
-async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
-  return resp.arrayBuffer();
-}
-
-/**
- * Decode audio from a media element's source into an AudioBuffer.
- * Never reads the whole file blindly: fetch is wrapped in a timeout so a
- * huge source file cannot hang the WebView forever. On failure, returns null
- * so the export can continue video-only instead of crashing.
- */
-async function decodeAudioFromElement(
-  audioCtx: BaseAudioContext,
-  el: HTMLMediaElement
-): Promise<AudioBuffer | null> {
+async function decodeSourceAudio(audioCtx: BaseAudioContext, src: string, required: boolean): Promise<AudioBuffer | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  let blob: Blob;
   try {
-    const src = el.src;
-    if (!src) return null;
-    logExport('audio-fetch', `Fetching audio source: ${src.slice(0, 120)}`);
-    const ab = await Promise.race([
-      fetchArrayBuffer(src),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('audio fetch timeout')), 15000)),
-    ]);
-    logExport('audio-fetch', `Fetched ${ab.byteLength} bytes`);
-    // Guard: refuse to decode more than ~150 MB of source audio (PCM would be ~10x that).
-    if (ab.byteLength > 150 * 1024 * 1024) {
-      logExport('audio-skip', `Source too large (${(ab.byteLength / 1024 / 1024).toFixed(1)} MB), skipping audio`);
-      return null;
-    }
-    return await Promise.race([
-      audioCtx.decodeAudioData(ab),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('audio decode timeout')), 30000)),
-    ]);
+    const response = await fetch(src, { signal: controller.signal });
+    if (!response.ok) throw new Error('Audio source read failed: ' + response.status);
+    blob = await response.blob();
+  } finally { clearTimeout(timer); }
+  // Check the Blob before allocating its ArrayBuffer or asking a WebView decoder for PCM.
+  if (blob.size > 32 * 1024 * 1024) throw new Error('Source exceeds WebView audio memory budget; use native export');
+  let knownAudio = required;
+  if (blob.type.includes('mp4') || blob.type.includes('quicktime')) {
+    const { inspectMp4 } = await import('./verifyOutput');
+    const tracks = await inspectMp4(blob);
+    if (!tracks.hasAudio) return null;
+    knownAudio = true;
+  }
+  try {
+    return await audioCtx.decodeAudioData(await blob.arrayBuffer());
   } catch (err) {
-    logExport('audio-error', err instanceof Error ? err.message : String(err));
+    logExport('audio-decode', String(err));
+    if (knownAudio) throw new Error('Source audio could not be decoded; refusing a silent replacement');
     return null;
   }
-}
-
-/**
- * Convert an AudioBuffer (planar Float32) to interleaved Int16 PCM chunks
- * suitable for feeding into AudioEncoder as EncodedAudioChunk input.
- */
-function audioBufferToPcmChunks(
-  buffer: AudioBuffer,
-  samplesPerChunk: number = 1024
-): { data: Int16Array; timestampUs: number }[] {
-  const numChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const length = buffer.length;
-
-  // Interleave channels into Float32
-  const interleaved = new Float32Array(length * numChannels);
-  for (let c = 0; c < numChannels; c++) {
-    const ch = buffer.getChannelData(c);
-    for (let i = 0; i < length; i++) {
-      interleaved[i * numChannels + c] = ch[i];
-    }
-  }
-
-  const chunks: { data: Int16Array; timestampUs: number }[] = [];
-  const samplesPerChunkPerChannel = samplesPerChunk;
-  const bytesPerChunk = samplesPerChunkPerChannel * numChannels * 2; // Int16
-
-  let totalSamplesWritten = 0;
-  let timestampUs = 0;
-
-  for (let offset = 0; offset < interleaved.length; offset += samplesPerChunkPerChannel * numChannels) {
-    const end = Math.min(offset + samplesPerChunkPerChannel * numChannels, interleaved.length);
-    const pcm = new Int16Array(end - offset);
-    for (let i = offset; i < end; i++) {
-      pcm[i - offset] = Math.max(-32768, Math.min(32767, Math.round(interleaved[i] * 32767)));
-    }
-    chunks.push({ data: pcm, timestampUs });
-    totalSamplesWritten += pcm.length / numChannels;
-    timestampUs = Math.round((totalSamplesWritten / sampleRate) * 1_000_000);
-  }
-
-  return chunks;
 }
 
 /**
@@ -298,23 +240,23 @@ export async function renderProjectAudio(
   const duration = Math.max(0.01, ...project.clips.map((c) => c.startTime + c.duration));
   const offline = new OfflineAudioContext(2, duration * sampleRate, sampleRate);
   let hasAnyAudio = false;
+  const decoded = new Map<string, AudioBuffer | null>();
+  let pcmBytes = 0;
 
   for (const clip of project.clips) {
     if (clip.trackType !== 'audio' && clip.trackType !== 'video') continue;
     if (clip.muted) continue;
 
-    let buffer: AudioBuffer | null = null;
-    let el: HTMLMediaElement | null = null;
-
-    if (clip.trackType === 'audio') {
-      el = audioElementsRef.get(clip.id) || null;
-    } else {
-      const cached = mediaElementCache.get(clip.id);
-      el = cached instanceof HTMLMediaElement ? cached : null;
+    if (!clip.mediaUrl) {
+      if (clip.trackType === 'audio') throw new Error('Synthetic audio export is not implemented');
+      continue;
     }
-
-    if (el && el.src) {
-      buffer = await decodeAudioFromElement(offline, el);
+    let buffer = decoded.get(clip.mediaUrl);
+    if (buffer === undefined) {
+      buffer = await decodeSourceAudio(offline, clip.mediaUrl, clip.trackType === 'audio');
+      decoded.set(clip.mediaUrl, buffer);
+      if (buffer) pcmBytes += buffer.length * buffer.numberOfChannels * 4;
+      if (pcmBytes > 96 * 1024 * 1024) throw new Error('Decoded audio exceeds WebView memory budget; use native export');
     }
 
     if (!buffer) continue;
@@ -641,6 +583,10 @@ async function runLabT3(
       videoFrame.close();
       videoFrame = null;
       framesEncoded++;
+      while (videoEncoder.encodeQueueSize >= 3) {
+        if (cancelRef.current) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
     } catch (err) {
       trace('lab-t3-encode-error', err instanceof Error ? err.message : String(err));
       try { if (videoFrame) videoFrame.close(); } catch {}
@@ -710,6 +656,10 @@ async function runLabT4(
       videoFrame.close();
       videoFrame = null;
       framesEncoded++;
+      while (videoEncoder.encodeQueueSize >= 3) {
+        if (cancelRef.current) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
     } catch (err) {
       trace('lab-t4-encode-error', err instanceof Error ? err.message : String(err));
       try { if (videoFrame) videoFrame.close(); } catch {}

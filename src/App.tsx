@@ -2168,6 +2168,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     exportBusyRef.current = true;
     setIsPlaying(false);
     soundEngine.stopAllAudio();
+    videoRef.current?.pause();
     mediaElementsRef.current.forEach(el => { if (el instanceof HTMLMediaElement) el.pause(); });
     audioElementsRef.current.forEach(el => el.pause());
     setIsExportingVideo(true);
