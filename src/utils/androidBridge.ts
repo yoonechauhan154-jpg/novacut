@@ -306,6 +306,7 @@ export async function saveToMediaStore(
       result.method = (saved.method || 'mediastore') as MediaSaveResult['method'];
 
       // 3. Verify the published file size against the blob size.
+      if (!result.uri) throw new Error('MediaStore did not return a saved file URI');
       const verify = await MediaSaver.verifySize({ uri: result.uri, expectedSize: blob.size });
       result.verified = verify.verified ?? null;
 
