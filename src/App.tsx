@@ -1,3 +1,6 @@
+import { exportProject } from './export/exportProject';
+import { nativeExportAvailable, type NativeResult } from './export/nativeExport';
+import { Capacitor } from '@capacitor/core';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
@@ -78,7 +81,6 @@ import {
   parseCubeLutFile,
   startWebCodecsExport,
   startMediaRecorderFallbackExport,
-  startCrashLadderExport,
   runExportLabTest,
   getLadderState,
   markLadderStrategy,
@@ -320,6 +322,9 @@ export function App() {
   // Export & Checklist Modal State
   const [showExportModal, setShowExportModal] = useState<boolean>(false);
   const [showChecklistModal, setShowChecklistModal] = useState<boolean>(false);
+  const exportBusyRef = useRef(false);
+  const [exportFailure, setExportFailure] = useState<string | null>(null);
+  const [nativeExportResult, setNativeExportResult] = useState<NativeResult | null>(null);
   const [isExportingVideo, setIsExportingVideo] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
@@ -726,7 +731,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   // Uses requestVideoFrameCallback when available, falls back to requestAnimationFrame.
   // Only ONE loop runs; cancelled on pause/unmount. No per-frame React re-renders.
   useEffect(() => {
-    if (screen !== 'editor') {
+    if (screen !== 'editor' || isExportingVideo || exportBusyRef.current) {
       if (renderRafRef.current) {
         cancelAnimationFrame(renderRafRef.current);
         renderRafRef.current = null;
@@ -747,6 +752,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     let rafId: number | null = null;
 
     const step = (now: number) => {
+      if (exportBusyRef.current) return;
       const dt = (now - lastTs) / 1000;
       lastTs = now;
 
@@ -2157,253 +2163,56 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     if (e.key === 'Escape' && fsStateRef.current.isFullscreen) { void closeFullscreenPreview(); }
   };
 
-  /**
-   * Verify the exported blob by loading it in a hidden <video> element,
-   * checking real duration, and sampling frames to detect frozen output.
-   */
-  const verifyExportedFile = async (
-    blob: Blob
-  ): Promise<{ ok: boolean; duration: number; frameCount: number; hasAudio: boolean; error: string | null }> => {
-    return new Promise((resolve) => {
-      const url = URL.createObjectURL(blob);
-      const video = document.createElement('video');
-      video.preload = 'metadata';
-      video.style.display = 'none';
-      document.body.appendChild(video);
-
-      let resolved = false;
-      const checkDuration = () => {
-        if (resolved) return;
-        if (video.duration && video.duration > 0) {
-          resolved = true;
-          const dur = video.duration;
-          // Sample 6 frames at evenly spaced times
-          const canvas = document.createElement('canvas');
-          canvas.width = 64;
-          canvas.height = 64;
-          const tCtx = canvas.getContext('2d');
-          if (!tCtx) {
-            resolved = true;
-            resolve({ ok: false, duration: dur, frameCount: 0, hasAudio: false, error: 'No canvas context for verification' });
-            URL.revokeObjectURL(url);
-            document.body.removeChild(video);
-            return;
-          }
-
-          const hasAudio = (video as any).audioTracks ? (video as any).audioTracks.length > 0 : blob.size > 50_000;
-
-          let frozenFrames = 0;
-          let totalSamples = 0;
-          const sampleTimes = [0.1, 0.3, 0.5, 0.7, 0.9, Math.max(0.9, dur - 0.1)];
-          let samplesDone = 0;
-          let prevHash: string | null = null;
-
-          const doSample = (idx: number) => {
-            if (samplesDone >= sampleTimes.length || resolved) {
-              resolve({
-                ok: frozenFrames <= Math.floor(sampleTimes.length / 2),
-                duration: dur,
-                frameCount: Math.round(dur * 30), // estimate
-                hasAudio,
-                error: frozenFrames > Math.floor(sampleTimes.length / 2) ? 'Export failed: frames are not changing — video appears frozen' : null,
-              });
-              URL.revokeObjectURL(url);
-              document.body.removeChild(video);
-              return;
-            }
-            const t = sampleTimes[idx];
-            video.currentTime = Math.min(t, dur - 0.05);
-            video.onseeked = () => {
-              if (resolved) return;
-              tCtx.drawImage(video, 0, 0, 64, 64);
-              const hash = tCtx.getImageData(0, 0, 64, 64).data.toString();
-              totalSamples++;
-              if (prevHash !== null && hash === prevHash) frozenFrames++;
-              prevHash = hash;
-              samplesDone++;
-              video.onseeked = null;
-              doSample(idx + 1);
-            };
-            video.onerror = () => {
-              if (resolved) return;
-              resolved = true;
-              resolve({ ok: false, duration: dur, frameCount: 0, hasAudio: false, error: 'Video element error during verification' });
-              URL.revokeObjectURL(url);
-              document.body.removeChild(video);
-            };
-          };
-          doSample(0);
-        } else if (video.readyState >= 2) {
-          // duration might be available now
-          requestAnimationFrame(checkDuration);
-        } else {
-          requestAnimationFrame(checkDuration);
-        }
-      };
-
-      video.onloadedmetadata = () => {
-        if (!resolved) requestAnimationFrame(checkDuration);
-      };
-      video.src = url;
-    });
-  };
-
-  const handleStartVideoExport = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    // Request wake lock to keep screen on during export
-    await requestWakeLock();
-
+  const handleStartVideoExport = async (mode: 'auto' | 'native' = 'auto') => {
+    if (exportBusyRef.current || labRunning) return;
+    exportBusyRef.current = true;
+    setIsPlaying(false);
+    soundEngine.stopAllAudio();
+    mediaElementsRef.current.forEach(el => { if (el instanceof HTMLMediaElement) el.pause(); });
+    audioElementsRef.current.forEach(el => el.pause());
     setIsExportingVideo(true);
     setExportProgress(0);
+    setExportFailure(null);
+    setNativeExportResult(null);
+    if (exportedVideoUrl?.startsWith('blob:')) URL.revokeObjectURL(exportedVideoUrl);
     setExportedVideoUrl(null);
     setExportedVideoBlob(null);
     setExportResult(null);
     setExportLog([]);
     exportCancelledRef.current = false;
-
     try {
-      // Probe WebCodecs support first
-      const support = await probeWebCodecsSupport();
-      setExportLog((prev) => [...prev, { step: 'probe', detail: `WebCodecs available=${support.available} video=${support.videoCodec} audio=${support.audioCodec}`, ts: Date.now() }]);
-
-      // In test mode (VITE_TEST_MODE), force MediaRecorder fallback for CI reliability
-      const isTestMode = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_TEST_MODE;
-      const useWebCodecs = !isTestMode && support.available && support.videoCodec;
-
-      if (!useWebCodecs) {
-        // Use MediaRecorder path (deterministic frame-by-frame, reliable in CI)
-        const webCodecsMsg = isTestMode ? 'forced by test mode' : `not available: ${support.reason || 'unknown'}`;
-        setExportLog((prev) => [...prev, { step: 'probe', detail: `Using MediaRecorder fallback (${webCodecsMsg})`, ts: Date.now() }]);
-        await startMediaRecorderFallbackExport({
-          project,
-          canvas,
-          mediaElementCache: mediaElementsRef.current,
-          audioElementsRef: audioElementsRef.current,
-          format: exportFormat,
-          safeMode: exportSafeMode,
-          onProgress: (pct) => {
-            setExportProgress(pct);
-            setExportLog((prev) => [...prev, { step: 'progress', detail: `${pct}%`, ts: Date.now() }]);
-          },
-          onResult: async (result) => {
-            setExportedVideoBlob(result.blob);
-            const url = URL.createObjectURL(result.blob);
-            setExportedVideoUrl(url);
-
-            // Verify the output
-            const verification = await verifyExportedFile(result.blob);
-            setExportResult({
-              format: result.format,
-              resolution: result.resolution,
-              duration: verification.duration,
-              frames: result.frames,
-              size: result.size,
-              hasAudio: verification.hasAudio,
-              verified: verification.ok,
-              verificationError: verification.error,
-            });
-            setExportLog((prev) => [
-              ...prev,
-              { step: 'verify', detail: `duration=${verification.duration.toFixed(2)}s frozen=${verification.error ? 'yes' : 'no'} hasAudio=${verification.hasAudio}`, ts: Date.now() },
-            ]);
-
-            setIsExportingVideo(false);
-            setExportProgress(100);
-            setIsPlaying(false);
-
-            if (verification.ok) {
-              triggerToast(
-                'Video rendered! Verified output. Tap Save & Share below.',
-                'वीडियो तैयार और सत्यापित! नीचे सेव और शेयर बटन दबाएं।'
-              );
-            } else {
-              triggerToast(
-                `Export warning: ${verification.error}`,
-                'एक्सपोर्ट चेतावनी: ' + verification.error
-              );
-            }
-          },
-          onError: (msg) => {
-            setIsExportingVideo(false);
-            setExportProgress(0);
-            setIsPlaying(false);
-            triggerToast(`Export error: ${msg}`);
-          },
-          cancelRef: exportCancelledRef,
-        });
-        return;
-      }
-
-      // WebCodecs path: deterministic frame-by-frame export
-      await startWebCodecsExport({
-        project,
-        canvas,
-        mediaElementCache: mediaElementsRef.current,
-        audioElementsRef: audioElementsRef.current,
-        format: exportFormat,
-        safeMode: exportSafeMode,
-        onProgress: (pct, framesDone, totalFrames, estMsLeft) => {
-          setExportProgress(pct);
-          setExportLog((prev) => [
-            ...prev,
-            { step: 'progress', detail: `Frame ${framesDone}/${totalFrames} (~${Math.round(estMsLeft / 1000)}s left)`, ts: Date.now() },
-          ]);
-        },
-        onResult: async (result) => {
-          setExportedVideoBlob(result.blob);
-          const url = URL.createObjectURL(result.blob);
-          setExportedVideoUrl(url);
-
-          // Verify the output before showing success
-          const verification = await verifyExportedFile(result.blob);
-          setExportResult({
-            format: result.format,
-            resolution: result.resolution,
-            duration: verification.duration,
-            frames: result.frames,
-            size: result.size,
-            hasAudio: verification.hasAudio,
-            verified: verification.ok,
-            verificationError: verification.error,
-          });
-          setExportLog((prev) => [
-            ...prev,
-            ...result.log.map((e) => ({ step: e.step, detail: e.detail, ts: e.ts })),
-            { step: 'verify', detail: `duration=${verification.duration.toFixed(2)}s frozen=${verification.error ? 'yes' : 'no'} hasAudio=${verification.hasAudio}`, ts: Date.now() },
-          ]);
-
-          setIsExportingVideo(false);
-          setExportProgress(100);
-          setIsPlaying(false);
-
-          if (verification.ok) {
-            triggerToast(
-              'Video rendered! Verified output. Tap Save & Share below.',
-              'वीडियो तैयार और सत्यापित! नीचे सेव और शेयर बटन दबाएं।'
-            );
-          } else {
-            triggerToast(
-              `Export warning: ${verification.error}`,
-              'एक्सपोर्ट चेतावनी: ' + verification.error
-            );
-          }
-        },
-        onError: (msg) => {
-          setIsExportingVideo(false);
-          setExportProgress(0);
-          setIsPlaying(false);
-          triggerToast(`Export error: ${msg}`);
-        },
-        cancelRef: exportCancelledRef,
+      await requestWakeLock();
+      const result = await exportProject(project, exportFormat, exportCancelledRef,
+        pct => setExportProgress(pct), mode, exportSafeMode);
+      if (exportCancelledRef.current) return;
+      setExportResult({
+        format: result.format, resolution: result.resolution, duration: result.duration,
+        frames: result.frames, size: result.size, hasAudio: result.hasAudio,
+        verified: result.verification.ok, verificationError: result.verification.error,
       });
+      if (result.native) {
+        setNativeExportResult(result.native);
+        setExportedVideoUrl(Capacitor.convertFileSrc(result.native.uri));
+        addMyExport({ name: result.native.name, size: result.native.size, uri: result.native.uri,
+          mimeType: 'video/mp4', date: new Date().toISOString() });
+        triggerToast(t(lang, 'exportNativeSaved'));
+      } else if (result.blob) {
+        setExportedVideoBlob(result.blob);
+        setExportedVideoUrl(URL.createObjectURL(result.blob));
+        triggerToast(t(lang, 'exportVerifiedReady'));
+      }
     } catch (err) {
-      setIsExportingVideo(false);
+      if (!exportCancelledRef.current) {
+        const message = err instanceof Error ? err.message : String(err);
+        setExportFailure(message);
+        triggerToast(t(lang, 'exportFailure'));
+      }
       setExportProgress(0);
-      setIsPlaying(false);
+    } finally {
+      setExportLog(getExportLog());
       await releaseWakeLock();
-      triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
+      exportBusyRef.current = false;
+      setIsExportingVideo(false);
     }
   };
 
@@ -2412,11 +2221,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   /*  Runs one test at a time, writing breadcrumbs before every step.   */
   /* ------------------------------------------------------------------ */
   const handleRunLabTest = async (testType: string) => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      triggerToast('No canvas available for lab test');
-      return;
-    }
+    if (exportBusyRef.current) return;
+    const canvas = document.createElement('canvas');
     labCancelRef.current = false;
     setLabRunning(true);
     setLabResults((prev) => ({ ...prev, [testType]: null }));
@@ -2428,7 +2234,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         canvas,
         mediaElementsRef.current,
         audioElementsRef.current,
-        { current: labCancelRef.current },
+        labCancelRef,
       );
       setLabResults((prev) => ({ ...prev, [testType]: result }));
       if (result.status === 'crashed') {
@@ -2448,6 +2254,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleRunAllLabTests = async () => {
+    labCancelRef.current = false;
     for (const t of ['T1', 'T2', 'T3', 'T4', 'T5'] as const) {
       if (labCancelRef.current) break;
       await handleRunLabTest(t);
@@ -2457,73 +2264,13 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   const handleCancelLabTests = () => {
     labCancelRef.current = true;
-    setLabRunning(false);
   };
 
   /* ------------------------------------------------------------------ */
   /*  CRASH LADDER — automatic export strategy fallback                 */
   /*  Tries strategies (a)–(e) in order until one succeeds.            */
   /* ------------------------------------------------------------------ */
-  const handleStartCrashLadderExport = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    await requestWakeLock();
-    setIsExportingVideo(true);
-    setExportProgress(0);
-    setExportedVideoUrl(null);
-    setExportedVideoBlob(null);
-    setExportResult(null);
-    setExportLog([]);
-    exportCancelledRef.current = false;
-
-    try {
-      await startCrashLadderExport(
-        project,
-        canvas,
-        mediaElementsRef.current,
-        audioElementsRef.current,
-        exportFormat,
-        exportSafeMode,
-        (pct, msg) => {
-          setExportProgress(pct);
-          setExportLog((prev) => [...prev, { step: 'progress', detail: msg, ts: Date.now() }]);
-        },
-        (result) => {
-          setExportedVideoBlob(result.blob);
-          const url = URL.createObjectURL(result.blob);
-          setExportedVideoUrl(url);
-          setExportResult({
-            format: result.format,
-            resolution: result.resolution,
-            duration: result.duration,
-            frames: result.frames,
-            size: result.size,
-            hasAudio: result.hasAudio,
-            verified: true,
-            verificationError: null,
-          });
-          setIsExportingVideo(false);
-          setExportProgress(100);
-          setIsPlaying(false);
-          triggerToast(`Export done via method ${result.strategy}! Verified output. Tap Save & Share below.`);
-        },
-        (msg) => {
-          setIsExportingVideo(false);
-          setExportProgress(0);
-          setIsPlaying(false);
-          triggerToast(`Export error: ${msg}`);
-        },
-        exportCancelledRef,
-      );
-    } catch (err) {
-      setIsExportingVideo(false);
-      setExportProgress(0);
-      setIsPlaying(false);
-      await releaseWakeLock();
-      triggerToast(`Export error: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  };
+  const handleStartCrashLadderExport = () => handleStartVideoExport();
 
   /* ------------------------------------------------------------------ */
   /*  SAVE TO GALLERY / SHARE (BUG 2 fix)                               */
@@ -2559,7 +2306,11 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleSaveToGallery = async (): Promise<void> => {
-    if (!exportedVideoBlob) return;
+    if (nativeExportResult) {
+      await handleOpenSavedUri(nativeExportResult.uri, 'video/mp4');
+      return;
+    }
+    if (!exportedVideoBlob || !exportResult?.verified) return;
     const ext = exportedVideoBlob.type === 'video/mp4' ? 'mp4' : 'webm';
     const name = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
     setSaveOutcome({ kind: 'saving', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: null });
@@ -2580,7 +2331,15 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleShareExport = async (): Promise<void> => {
-    if (!exportedVideoBlob) return;
+    if (nativeExportResult) {
+      try {
+        const { registerPlugin } = await import('@capacitor/core');
+        const saver = registerPlugin<any>('MediaSaver');
+        await saver.shareUri({ uri: nativeExportResult.uri, title: project.name, text: '', mimeType: 'video/mp4' });
+      } catch (err) { setExportFailure(String(err)); }
+      return;
+    }
+    if (!exportedVideoBlob || !exportResult?.verified) return;
     const ext = exportedVideoBlob.type === 'video/mp4' ? 'mp4' : 'webm';
     const name = `${project.name.replace(/\s+/g, '_')}_${project.resolution}.${ext}`;
     setSaveOutcome({ kind: 'saving', name, size: exportedVideoBlob.size, uri: null, relativePath: null, method: null, sdkInt: null, verified: null, error: null });
@@ -2649,18 +2408,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   const handleCancelVideoExport = () => {
     exportCancelledRef.current = true;
-    if (exportIntervalRef.current) {
-      clearInterval(exportIntervalRef.current);
-      exportIntervalRef.current = null;
-    }
     setIsPlaying(false);
-    try {
-      if (exportRecorderRef.current && exportRecorderRef.current.state !== 'inactive') {
-        exportRecorderRef.current.stop();
-      }
-    } catch {}
-    setIsExportingVideo(false);
-    setExportProgress(0);
+    // Keep the UI busy until decoder/encoder/native cleanup has finished.
   };
 
   const handleCopyExportLog = () => {
@@ -5711,7 +5460,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                       onClick={handleCopyExportLog}
                       className="min-h-[34px] rounded-lg border border-slate-700 bg-slate-900 text-slate-200 font-medium text-xs flex items-center justify-center gap-1"
                     >
-                      <Copy className="w-3 h-3" /> Copy Export Log
+                      <Copy className="w-3 h-3" /> {t(lang, 'exportCopyDiagnostics')}
                     </button>
                   )}
                 </div>
@@ -5730,7 +5479,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                 ) : !exportedVideoUrl ? (
                   <button
                     type="button"
-                    onClick={handleStartVideoExport}
+                    onClick={() => handleStartVideoExport()}
                     className="w-full min-h-[46px] rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                   >
                     <Download className="w-4 h-4" />
@@ -5747,7 +5496,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                       className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                     >
                       <Check className="w-4 h-4" />
-                      <span>Save to Gallery</span>
+                      <span>{t(lang, nativeExportResult ? 'exportOpenSaved' : 'exportSaveGallery')}</span>
                     </button>
                     <button
                       type="button"
@@ -5756,11 +5505,30 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                       className="w-full min-h-[46px] rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs flex items-center justify-center gap-2"
                     >
                       <Share className="w-4 h-4" />
-                      <span>Share</span>
+                      <span>{t(lang, 'exportShare')}</span>
                     </button>
                   </div>
                 )}
               </div>
+
+              {!isExportingVideo && nativeExportAvailable() && (
+                <button type="button" onClick={() => handleStartVideoExport('native')}
+                  className="w-full min-h-[44px] rounded-xl border border-slate-600 text-sm text-slate-200">
+                  {t(lang, 'exportUseNative')}
+                </button>
+              )}
+              {exportFailure && (
+                <div role="alert" data-testid="export-failure" className="p-3 rounded-xl border border-rose-500 text-rose-200 space-y-2">
+                  <strong>{t(lang, 'exportFailure')}</strong>
+                  <p className="text-xs">{t(lang, 'exportFailureHint')}</p>
+                  <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all text-[10px]">
+                    {exportFailure + '\n' + exportLog.map(e => e.step + ': ' + e.detail).join('\n')}
+                  </pre>
+                  <button type="button" className="min-h-[44px] px-3 rounded border border-rose-300" onClick={handleCopyExportLog}>
+                    {t(lang, 'exportCopyDiagnostics')}
+                  </button>
+                </div>
+              )}
 
               {/* Export Result Info: format, resolution, duration, frames, size, audio, verification */}
               {exportResult && (
@@ -5770,7 +5538,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                     <span
                       className={`px-2 py-0.5 rounded text-[10px] font-bold ${exportResult.verified ? 'bg-emerald-900/50 text-emerald-400 border border-emerald-500/50' : 'bg-rose-900/50 text-rose-400 border border-rose-500/50'}`}
                     >
-                      {exportResult.verified ? 'Verified' : 'Not Verified'}
+                      {t(lang, exportResult.verified ? 'exportVerified' : 'exportNotVerified')}
                     </span>
                   </div>
                   <div className="text-[10px] text-slate-300 space-y-0.5">

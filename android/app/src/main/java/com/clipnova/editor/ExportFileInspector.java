@@ -21,6 +21,7 @@ final class ExportFileInspector {
         String mime = format.getString(MediaFormat.KEY_MIME);
         if (mime != null && mime.startsWith("audio/")) {
           extractor.selectTrack(i);
+          extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
           hasAudio = extractor.getSampleTime() >= 0;
           extractor.unselectTrack(i);
         }
@@ -29,6 +30,7 @@ final class ExportFileInspector {
           width = format.getInteger(MediaFormat.KEY_WIDTH);
           height = format.getInteger(MediaFormat.KEY_HEIGHT);
           extractor.selectTrack(i);
+          extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
           while (extractor.getSampleTime() >= 0) { frames++; if (!extractor.advance()) break; }
           extractor.unselectTrack(i);
         }
@@ -46,7 +48,7 @@ final class ExportFileInspector {
         throw new Exception("Output duration mismatch: " + duration + " / " + expectedDuration);
       int[] previous = null;
       for (double fraction : new double[] {.05, .23, .41, .59, .77, .95}) {
-        Bitmap bitmap = retriever.getFrameAtTime((long)(duration * fraction * 1000000), MediaMetadataRetriever.OPTION_CLOSEST);
+        Bitmap bitmap = retriever.getScaledFrameAtTime((long)(duration * fraction * 1000000), MediaMetadataRetriever.OPTION_CLOSEST, 32, 32);
         if (bitmap == null) throw new Exception("Output frame cannot be decoded");
         Bitmap small = Bitmap.createScaledBitmap(bitmap, 32, 32, true);
         int[] pixels = new int[1024];

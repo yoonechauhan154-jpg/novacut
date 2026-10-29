@@ -13,6 +13,17 @@ export const SUPPORTED_LANGUAGES: LanguageOption[] = [
 
 export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
   en: {
+    exportNativeSaved: "Verified video saved to Movies/ClipNova.",
+    exportVerifiedReady: "Video verified. Tap Save to Gallery or Share.",
+    exportFailure: "Export error",
+    exportFailureHint: "No verified output was produced. Copy the diagnostics below.",
+    exportVerified: "Verified",
+    exportNotVerified: "Not verified",
+    exportOpenSaved: "Open saved video",
+    exportSaveGallery: "Save to Gallery",
+    exportShare: "Share",
+    exportCopyDiagnostics: "Copy diagnostics",
+    exportUseNative: "Use Android exporter",
     // Home Screen & Tabs
     tabHome: 'Home',
     tabTemplates: 'Templates',
@@ -187,6 +198,17 @@ export const TRANSLATIONS: Record<LanguageCode, Record<string, string>> = {
     exportLogCopied: 'Export log copied to clipboard.',
   },
   hi: {
+    exportNativeSaved: "सत्यापित वीडियो Movies/ClipNova में सेव किया गया।",
+    exportVerifiedReady: "वीडियो सत्यापित है। गैलरी में सेव करें या शेयर करें।",
+    exportFailure: "एक्सपोर्ट त्रुटि",
+    exportFailureHint: "कोई सत्यापित वीडियो नहीं बना। नीचे का निदान कॉपी करें।",
+    exportVerified: "सत्यापित",
+    exportNotVerified: "सत्यापित नहीं",
+    exportOpenSaved: "सेव किया वीडियो खोलें",
+    exportSaveGallery: "गैलरी में सेव करें",
+    exportShare: "शेयर करें",
+    exportCopyDiagnostics: "निदान कॉपी करें",
+    exportUseNative: "Android एक्सपोर्टर इस्तेमाल करें",
     // Home Screen & Tabs
     tabHome: 'होम',
     tabTemplates: 'टेम्पलेट्स',
