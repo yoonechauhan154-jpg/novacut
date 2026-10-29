@@ -142,8 +142,8 @@ test('WebCodecs MP4 has microsecond timestamps and decoder configuration', async
     const enginePath = '/src/export/webCodecsExport.ts', presetsPath = '/src/data/presets.ts', verifyPath = '/src/export/verifyOutput.ts';
     const { encodeWebCodecs } = await import(enginePath), { INITIAL_PROJECT, createBaseClip } = await import(presetsPath);
     const { inspectMp4, verifyOutput } = await import(verifyPath);
-    const clip = createBaseClip({ id: 'synthetic', trackId: 'main', trackType: 'video', title: 'moving pattern',
-      startTime: 0, duration: 1, sourceType: 'procedural-scene' });
+    const clip = createBaseClip({ id: 'decoded-video', trackId: 'main', trackType: 'video', title: 'decoded moving source',
+      startTime: 0, duration: 1, sourceType: 'uploaded-video', mediaUrl: '/test-assets/test-12s.webm' });
     let blob: Blob | undefined;
     await encodeWebCodecs({ project: { ...INITIAL_PROJECT, aspectRatio: '16:9', resolution: '480p', fps: 30, clips: [clip] },
       canvas: document.createElement('canvas'), mediaElementCache: new Map(), audioElementsRef: new Map(),
