@@ -15,7 +15,9 @@ async function verifyExport(page: Page, id: string, label: string, info: TestInf
     const urls = lease.project.clips.map((c: { mediaUrl?: string }) => c.mediaUrl).filter(Boolean);
     let result;
     try {
-      result = await exportProject(project, 'mp4', { current: false }, () => {});
+      const app = (window as any).__clipnovaSourceTest;
+      result = app?.project.id === id ? await app.export() : await exportProject(project, 'mp4', { current: false }, () => {});
+      if (!result) throw new Error('App export failed: ' + document.body.innerText);
       for (const url of urls) if (!(await fetch(url)).ok) throw new Error('Export invalidated a source handle');
       if (saveGallery) {
         const bridgePath = '/src/utils/androidBridge.ts'; const { saveToMediaStore } = await import(bridgePath);
@@ -92,6 +94,11 @@ for (const decorated of [false, true]) {
       await saveProjectToStorage(project);
       return project.id;
     }, decorated);
+    await page.evaluate(async (id) => {
+      const path = '/src/utils/projectStorage.ts'; const { loadAllProjectsFromStorage } = await import(path);
+      await (window as any).__clipnovaSourceTest.open((await loadAllProjectsFromStorage()).find((p: { id: string }) => p.id === id));
+    }, id);
+    await expect.poll(() => page.evaluate(() => (window as any).__clipnovaSourceTest?.project.id)).toBe(id);
     for (let n = 1; n <= 3; n++) await verifyExport(page, id, id + '-export-' + n, info, n === 3);
     await verifyExport(page, id, id + '-after-gallery', info);
     await page.reload();
@@ -175,7 +182,10 @@ test('missing source is shown on Home reopen and relink preserves split edits', 
   const chooserPromise = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Relink', exact: true }).click();
   const chooser = await chooserPromise; await chooser.setFiles('test-assets/test-12s.webm');
-  await expect(page.getByTestId('missing-sources')).toHaveCount(0);
+  try { await expect(page.getByTestId('missing-sources')).toHaveCount(0); }
+  catch (error) { console.log('RELINK UI:', await page.locator('body').innerText());
+    console.log('RELINK TRACE:', await page.evaluate(async () => { const path = '/src/export/exportEngine.ts'; return (await import(path)).getExportLog(); }));
+    throw error; }
   const clips = await page.evaluate(async () => {
     const path = '/src/utils/projectStorage.ts'; const { loadAllProjectsFromStorage } = await import(path);
     return (await loadAllProjectsFromStorage()).find((p: { id: string }) => p.id === 'missing-project').clips;

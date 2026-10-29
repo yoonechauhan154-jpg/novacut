@@ -2239,6 +2239,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         setExportedVideoUrl(createOwnedMediaUrl(result.blob, 'App.exportResult'));
         triggerToast(t(lang, 'exportVerifiedReady'));
       }
+      return result;
     } catch (err) {
       if (!exportCancelledRef.current) {
         const message = err instanceof Error ? err.message : String(err);
@@ -2254,6 +2255,16 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       setIsExportingVideo(false);
     }
   };
+
+  // CI exercises the real export handler (including preview suspension). Never exposed in APK builds.
+  useEffect(() => {
+    if (import.meta.env.VITE_TEST_MODE !== 'true') return;
+    const target = window as typeof window & { __clipnovaSourceTest?: {
+      project: ProjectData; open: typeof openEditorWithProject; export: typeof handleStartVideoExport;
+    } };
+    target.__clipnovaSourceTest = { project, open: openEditorWithProject, export: handleStartVideoExport };
+    return () => { delete target.__clipnovaSourceTest; };
+  });
 
   /* ------------------------------------------------------------------ */
   /*  EXPORT LAB — isolated crash-diagnostic tests (T1–T5)              */
