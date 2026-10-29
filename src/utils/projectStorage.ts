@@ -65,7 +65,10 @@ export async function saveMediaBlobToIdb(blobId: string, blob: Blob): Promise<vo
   // Materialize bytes: a picker File can be backed by a temporary provider handle.
   // Android owns a copy in Data, never Cache. Browser IDB owns detached byte chunks.
   if (Capacitor.isNativePlatform()) {
-    record.path = 'clipnova-sources/' + crypto.randomUUID() + '.media';
+    const extension = ({ 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
+      'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'audio/mpeg': '.mp3',
+      'audio/wav': '.wav', 'audio/mp4': '.m4a' } as Record<string, string>)[blob.type] || '.media';
+    record.path = 'clipnova-sources/' + crypto.randomUUID() + extension;
     try {
       for (let offset = 0; offset < blob.size; offset += chunkSize) {
         const chunk = new Blob([await blob.slice(offset, offset + chunkSize).arrayBuffer()]);
@@ -208,28 +211,41 @@ export async function saveProjectToStorage(project: ProjectData): Promise<void> 
 }
 
 export async function deleteProjectFromStorage(projectId: string): Promise<void> {
+  const db = await openDatabase(), files: string[] = [];
+  const ids = (project: ProjectData) => new Set([...project.clips, ...(project.importedMedia || [])]
+    .map(item => item.mediaBlobId).filter((id): id is string => !!id));
   try {
-    const db = await openDatabase();
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction(STORE_PROJECTS, 'readwrite');
-      tx.objectStore(STORE_PROJECTS).delete(projectId);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve();
+    await new Promise<void>((resolve, reject) => {
+      // Check references and remove records in one transaction: duplicated projects share bytes.
+      const tx = db.transaction([STORE_PROJECTS, STORE_BLOBS], 'readwrite');
+      const projects = tx.objectStore(STORE_PROJECTS), blobs = tx.objectStore(STORE_BLOBS);
+      const all = projects.getAll();
+      all.onsuccess = () => {
+        const valid = (all.result as unknown[]).filter(isValidProjectData);
+        const removed = valid.find(p => p.id === projectId);
+        const retained = new Set(valid.filter(p => p.id !== projectId).flatMap(p => [...ids(p)]));
+        projects.delete(projectId);
+        if (removed) for (const id of ids(removed)) if (!retained.has(id)) {
+          const record = blobs.get(id);
+          record.onsuccess = () => {
+            const path = (record.result as StoredMedia | undefined)?.path;
+            if (path) files.push(path);
+            blobs.delete(id);
+          };
+        }
+      };
+      tx.oncomplete = () => resolve(); tx.onerror = tx.onabort = () => reject(tx.error || new Error('Project deletion aborted'));
     });
-    db.close();
-  } catch {
-    // ignore
+  } finally { db.close(); }
+  for (const path of files) if (/^clipnova-sources\/[^/]+$/.test(path)) {
+    try {
+      await Filesystem.deleteFile({ path, directory: Directory.Data });
+      auditMedia('deleted', path, 'deleteProjectFromStorage', projectId);
+    } catch (error) { auditMedia('delete-failed', path, 'deleteProjectFromStorage', String(error)); }
   }
-
   try {
-    const rawStr = localStorage.getItem(LS_FALLBACK_KEY);
-    if (!rawStr) return;
-    const existing = JSON.parse(rawStr);
-    if (Array.isArray(existing)) {
-      const next = existing.filter((p) => p && p.id !== projectId);
-      localStorage.setItem(LS_FALLBACK_KEY, JSON.stringify(next));
-    }
-  } catch {
-    // ignore
-  }
+    const existing = JSON.parse(localStorage.getItem(LS_FALLBACK_KEY) || '[]');
+    if (Array.isArray(existing)) localStorage.setItem(LS_FALLBACK_KEY,
+      JSON.stringify(existing.filter(p => p && p.id !== projectId)));
+  } catch {}
 }

@@ -6,7 +6,10 @@ const urls = new Map<string, string>();
 export const revokedSourceUrls = new Set<string>();
 export const deletedMediaFiles = new Set<string>();
 export function getMediaAudit(): MediaAuditEntry[] {
-  try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { return []; }
+  try {
+    const entries = JSON.parse(localStorage.getItem(KEY) || '[]');
+    return Array.isArray(entries) ? entries.filter(e => e && typeof e.resource === 'string' && typeof e.owner === 'string') : [];
+  } catch { return []; }
 }
 export function auditMedia(action: string, resource: string, owner: string, detail?: string) {
   const entry = { ts: Date.now(), action, resource, owner, detail };

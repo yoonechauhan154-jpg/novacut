@@ -184,3 +184,21 @@ test('missing source is shown on Home reopen and relink preserves split edits', 
   expect(clips[0].mediaBlobId).toBe(clips[1].mediaBlobId);
   expect(clips[1].sourceStart).toBe(1); expect(clips[1].transitionIn).toBe('slide');
 });
+
+test('deleting one project retains shared sources until the final project is deleted', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const storagePath = '/src/utils/projectStorage.ts', presetsPath = '/src/data/presets.ts';
+    const { saveMediaBlobToIdb, loadMediaBlobFromIdb, saveProjectToStorage, deleteProjectFromStorage } = await import(storagePath);
+    const { INITIAL_PROJECT, createBaseClip } = await import(presetsPath);
+    await saveMediaBlobToIdb('shared-source', new Blob(['owned bytes'], { type: 'video/test' }));
+    const clip = createBaseClip({ id: 'shared', title: 'shared', startTime: 0, duration: 1, trackId: 'main',
+      trackType: 'video', sourceType: 'uploaded-video', mediaBlobId: 'shared-source' });
+    for (const id of ['owner-a', 'owner-b']) await saveProjectToStorage({ ...INITIAL_PROJECT, id, clips: [clip], importedMedia: [] });
+    await deleteProjectFromStorage('owner-a');
+    const retained = (await loadMediaBlobFromIdb('shared-source'))?.size;
+    await deleteProjectFromStorage('owner-b');
+    return { retained, removed: await loadMediaBlobFromIdb('shared-source') === null };
+  });
+  expect(result).toEqual({ retained: 11, removed: true });
+});
