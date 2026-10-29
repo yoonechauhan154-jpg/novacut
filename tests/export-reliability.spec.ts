@@ -93,10 +93,16 @@ test('real split/join export has moving frames, timeline duration and audible au
   mkdirSync('test-exports', { recursive: true });
   const file = resolve('test-exports/phase1-split-join.' + (output.mime.includes('mp4') ? 'mp4' : 'webm'));
   writeFileSync(file, Buffer.from(output.base64, 'base64'));
-  const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-show_format', '-of', 'json', file], { encoding: 'utf8' }));
+  const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-show_format', '-show_packets', '-of', 'json', file], { encoding: 'utf8' }));
   const video = probe.streams.find((s: { codec_type: string }) => s.codec_type === 'video'), audio = probe.streams.find((s: { codec_type: string }) => s.codec_type === 'audio');
   expect(video).toBeTruthy(); expect(audio).toBeTruthy();
-  expect(Number(probe.format.duration)).toBeGreaterThan(3.6); expect(Number(probe.format.duration)).toBeLessThan(4.5);
+  // Streaming WebM has no duration header. ffprobe packet timestamps measure the actual media length.
+  const packets = probe.packets.filter((p: { pts_time?: string }) => Number.isFinite(Number(p.pts_time)));
+  const packetStart = Math.min(...packets.map((p: { pts_time: string }) => Number(p.pts_time)));
+  const packetEnd = Math.max(...packets.map((p: { pts_time: string; duration_time?: string }) =>
+    Number(p.pts_time) + (Number(p.duration_time) || 0)));
+  const measuredDuration = Number.isFinite(Number(probe.format.duration)) ? Number(probe.format.duration) : packetEnd - packetStart;
+  expect(measuredDuration).toBeGreaterThan(3.6); expect(measuredDuration).toBeLessThan(4.5);
   expect(Number(video.nb_read_frames)).toBeGreaterThan(30);
   const hashes = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-an', '-vf', 'fps=2,scale=32:32', '-f', 'framemd5', '-'], { encoding: 'utf8' });
   expect(new Set(hashes.split('\n').filter(l => l && !l.startsWith('#')).map(l => l.split(',').pop())).size).toBeGreaterThan(2);
@@ -135,7 +141,7 @@ test('WebCodecs MP4 has microsecond timestamps and decoder configuration', async
   const output = await page.evaluate(async () => {
     const enginePath = '/src/export/webCodecsExport.ts', presetsPath = '/src/data/presets.ts', verifyPath = '/src/export/verifyOutput.ts';
     const { encodeWebCodecs } = await import(enginePath), { INITIAL_PROJECT, createBaseClip } = await import(presetsPath);
-    const { inspectMp4 } = await import(verifyPath);
+    const { inspectMp4, verifyOutput } = await import(verifyPath);
     const clip = createBaseClip({ id: 'synthetic', trackId: 'main', trackType: 'video', title: 'moving pattern',
       startTime: 0, duration: 1, sourceType: 'procedural-scene' });
     let blob: Blob | undefined;
@@ -143,10 +149,20 @@ test('WebCodecs MP4 has microsecond timestamps and decoder configuration', async
       canvas: document.createElement('canvas'), mediaElementCache: new Map(), audioElementsRef: new Map(),
       format: 'mp4', safeMode: true, cancelRef: { current: false }, onProgress: () => {}, onError: (e: string) => { throw new Error(e); },
       onResult: (r: { blob: Blob }) => { blob = r.blob; } }, () => {});
-    return await inspectMp4(blob!);
+    const metadata = await inspectMp4(blob!);
+    const verification = await verifyOutput(blob!, 1, false, true, { current: false }, () => {});
+    const base64: string = await new Promise(resolve => { const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(blob!); });
+    return { ...metadata, verification, base64 };
   });
   expect(output.frames).toBe(30);
   expect(output.duration).toBeCloseTo(1, 1);
   expect(output.hasAudio).toBe(false);
-  await testInfo.attach('mp4-sample-table', { body: JSON.stringify(output), contentType: 'application/json' });
+  expect(output.verification.ok, output.verification.error || '').toBe(true);
+  mkdirSync('test-exports', { recursive: true });
+  const mp4 = resolve('test-exports/phase1-webcodecs.mp4');
+  writeFileSync(mp4, Buffer.from(output.base64, 'base64'));
+  const decoded = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-of', 'json', mp4], { encoding: 'utf8' }));
+  expect(Number(decoded.streams[0].nb_read_frames)).toBe(30);
+  await testInfo.attach('mp4-sample-table', { body: JSON.stringify({ frames: output.frames, duration: output.duration, verification: output.verification }), contentType: 'application/json' });
 });

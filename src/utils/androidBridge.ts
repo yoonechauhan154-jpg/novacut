@@ -1,4 +1,4 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { StatusBar, Style } from '@capacitor/status-bar';
@@ -41,6 +41,12 @@ interface MediaSaverPlugin {
   }>;
   openUri(opts: { uri: string; mimeType: string }): Promise<void>;
   shareUri(opts: { uri: string; title: string; text: string; mimeType: string }): Promise<void>;
+}
+
+const registeredMediaSaver = registerPlugin<MediaSaverPlugin>('MediaSaver');
+
+export function getMediaSaverPlugin(): MediaSaverPlugin | null {
+  return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('MediaSaver') ? registeredMediaSaver : null;
 }
 
 declare module '@capacitor/core' {
@@ -253,7 +259,7 @@ export async function saveToMediaStore(
   };
 
   const isNative = isAndroidNativeApp();
-  const MediaSaver = isNative ? ((Capacitor as any).Plugins?.MediaSaver) : null;
+  const MediaSaver = isNative ? getMediaSaverPlugin() : null;
 
   try {
     // 1. Write the blob to the app cache in 2 MiB base64 chunks.

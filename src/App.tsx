@@ -1,3 +1,4 @@
+import { getMediaSaverPlugin } from './utils/androidBridge';
 import { exportProject } from './export/exportProject';
 import { nativeExportAvailable, type NativeResult } from './export/nativeExport';
 import { Capacitor } from '@capacitor/core';
@@ -2278,7 +2279,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   /*  SAVE TO GALLERY / SHARE (BUG 2 fix)                               */
   /* ------------------------------------------------------------------ */
   const mediaSaverPlugin = (): any => {
-    try { return (window as any).capacitor?.Plugins?.MediaSaver; } catch { return null; }
+    return getMediaSaverPlugin();
   };
 
   const MY_EXPORTS_KEY = 'clipnova_my_exports';
