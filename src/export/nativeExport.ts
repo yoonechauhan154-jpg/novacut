@@ -102,7 +102,7 @@ export async function exportNative(project: ProjectData, cancel: CancelFlag, log
       }
       sources.push({ path, track: c.trackType, start: c.startTime, duration: c.duration,
         sourceStart: c.sourceStart, sourceEnd: c.sourceStart + c.duration * c.speed,
-        speed: c.speed, volume: c.volume / 100, fadeIn: c.fadeIn, fadeOut: c.fadeOut,
+        speed: c.speed, keepPitch: c.keepPitch !== false, volume: c.volume / 100, fadeIn: c.fadeIn, fadeOut: c.fadeOut,
         image: c.sourceType === 'uploaded-image' });
     }
     const { width, height } = getAspectDimensions(project.aspectRatio, 'export-full', project.resolution);

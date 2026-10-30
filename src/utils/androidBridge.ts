@@ -1,3 +1,4 @@
+import { logExport } from '../export/exportEngine';
 import { createOwnedMediaUrl, revokeOwnedMediaUrl, deleteExportTemp } from './mediaOwnership';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Directory, Filesystem } from '@capacitor/filesystem';
@@ -20,7 +21,7 @@ interface CapacitorAppPlugin {
 }
 
 /** Custom native plugin (MediaSaverPlugin, registered in MainActivity). */
-interface MediaSaverPlugin {
+export interface MediaSaverPlugin {
   saveVideo(opts: {
     path: string;
     displayName: string;
@@ -34,11 +35,14 @@ interface MediaSaverPlugin {
     method: string;
     sdkInt: number;
   }>;
+  saveAs(opts: { path: string; displayName: string; mimeType: string; expectedSize: number }): Promise<{ uri: string; size: number; method: string; sdkInt: number }>;
   verifySize(opts: { uri: string; expectedSize: number }): Promise<{
     uri: string;
     actualSize: number;
     expectedSize: number;
     verified: boolean;
+    exists?: boolean;
+    pending?: number;
   }>;
   openUri(opts: { uri: string; mimeType: string }): Promise<void>;
   shareUri(opts: { uri: string; title: string; text: string; mimeType: string }): Promise<void>;
@@ -58,7 +62,8 @@ declare module '@capacitor/core' {
 
 export interface MediaSaveResult {
   saved: boolean;
-  method: 'mediastore' | 'legacy-public-movies' | 'filesystem' | 'download';
+  method: 'mediastore' | 'legacy-public-movies' | 'filesystem' | 'download' | 'document';
+  diagnostics?: string;
   uri: string | null;
   size: number;
   relativePath: string | null;
@@ -177,7 +182,7 @@ export async function saveAndShareFileOnDevice(
   fileName: string,
   title: string = 'ClipNova Export'
 ): Promise<{ saved: boolean; savedPath: string; shared: boolean }> {
-  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeName = uniqueExportName(fileName);
 
   if (isAndroidNativeApp()) {
     try {
@@ -253,7 +258,7 @@ export async function saveToMediaStore(
   mimeType: string = 'video/mp4',
   dependencies?: MediaSaveDependencies
 ): Promise<MediaSaveResult> {
-  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeName = uniqueExportName(fileName);
   const cachePath = `clipnova-exports/${crypto.randomUUID()}-${safeName}`;
   const filesystem = dependencies?.filesystem || Filesystem;
   const result: MediaSaveResult = {
@@ -302,35 +307,9 @@ export async function saveToMediaStore(
 
     // 2. Native MediaStore path.
     if (MediaSaver) {
-      const saved = await MediaSaver.saveVideo({
-        path: filePath,
-        displayName: safeName,
-        mimeType,
-        expectedSize: blob.size,
-      });
-      result.uri = saved.uri || null;
-      result.size = saved.size ?? blob.size;
-      result.relativePath = saved.relativePath || null;
-      result.sdkInt = saved.sdkInt != null ? Number(saved.sdkInt) : null;
-      result.method = (saved.method || 'mediastore') as MediaSaveResult['method'];
-
-      // 3. Verify the published file size against the blob size.
-      if (!result.uri) throw new Error('MediaStore did not return a saved file URI');
-      const verify = await MediaSaver.verifySize({ uri: result.uri, expectedSize: blob.size });
-      result.verified = verify.verified ?? null;
-
-      // 4. Remove the temp cache file.
-      try {
-        await deleteExportTemp(cachePath, 'saveToMediaStore.cleanup', filesystem);
-      } catch {
-        // ignore — temp file cleanup is best effort
-      }
-
-      result.saved = true;
-      if (result.verified === false) {
-        result.error = `Saved but MediaStore size mismatch: expected ${blob.size} bytes, got ${result.size}`;
-      }
-      return result;
+      const published = await publishExportPath(filePath, safeName, mimeType, blob.size, MediaSaver);
+      try { await deleteExportTemp(cachePath, 'saveToMediaStore.cleanup', filesystem); } catch {}
+      return published;
     }
 
     // 5. No native plugin (e.g. browser or older build): keep the previous
@@ -351,4 +330,41 @@ export async function saveToMediaStore(
     try { await deleteExportTemp(cachePath, 'saveToMediaStore.cleanup', filesystem); } catch {}
     return result;
   }
+}
+
+/** Timestamp plus random suffix, including repeated saves within the same millisecond. */
+export function uniqueExportName(name: string) {
+  const safe = name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const dot = safe.lastIndexOf('.');
+  const stem = (dot >= 0 ? safe.slice(0, dot) : safe).slice(0, 80) || 'ClipNova';
+  const ext = dot >= 0 ? safe.slice(dot) : '.mp4';
+  return stem + '-' + Date.now() + '-' + crypto.randomUUID().slice(0, 8) + ext;
+}
+export async function publishExportPath(path: string, name: string, mimeType: string, size: number,
+  saver: Pick<MediaSaverPlugin, 'saveVideo' | 'verifySize'> & Partial<Pick<MediaSaverPlugin, 'saveAs'>>,
+  saveAs = false): Promise<MediaSaveResult> {
+  const diagnostic: Record<string, unknown> = { method: saveAs ? 'document' : 'mediastore', displayName: name, path, expectedSize: size };
+  const result: MediaSaveResult = { saved: false, method: saveAs ? 'document' : 'mediastore', uri: null,
+    size, relativePath: null, sdkInt: null, verified: false, error: null };
+  try {
+    if (size <= 0) throw new Error('Finished export is empty');
+    const options = { path: path.replace(/^file:\/\//, ''), displayName: name, mimeType, expectedSize: size };
+    if (saveAs && !saver.saveAs) throw new Error('Save as is unavailable in this Android build');
+    const saved = saveAs ? await saver.saveAs!(options) : await saver.saveVideo(options);
+    Object.assign(diagnostic, { uri: saved.uri, bytesWritten: saved.size, apiLevel: saved.sdkInt, method: saved.method });
+    if (!saved.uri) throw new Error('MediaStore did not return a saved file URI');
+    if (saved.size !== size) throw new Error('Save byte count mismatch: expected ' + size + ', wrote ' + saved.size);
+    const query = await saver.verifySize({ uri: saved.uri, expectedSize: size });
+    diagnostic.query = query;
+    if (!query.verified || query.actualSize !== size || query.exists === false || (query.pending != null && query.pending !== 0))
+      throw new Error('Saved file is not published or size mismatch: ' + JSON.stringify(query));
+    Object.assign(result, { saved: true, verified: true, uri: saved.uri, sdkInt: Number(saved.sdkInt),
+      method: saved.method || result.method, relativePath: 'relativePath' in saved ? saved.relativePath : saved.uri });
+  } catch (error) {
+    result.error = error instanceof Error ? error.message : String(error);
+    diagnostic.exception = result.error;
+  }
+  result.diagnostics = JSON.stringify(diagnostic);
+  logExport(result.saved ? 'save-verified' : 'save-error', result.diagnostics);
+  return result;
 }

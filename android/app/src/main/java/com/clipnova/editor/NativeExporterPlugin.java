@@ -18,7 +18,6 @@ import androidx.media3.common.OverlaySettings;
 import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.common.audio.ChannelMixingAudioProcessor;
 import androidx.media3.common.audio.ChannelMixingMatrix;
-import androidx.media3.common.audio.SpeedProvider;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.effect.BitmapOverlay;
 import androidx.media3.effect.OverlayEffect;
@@ -63,6 +62,7 @@ public class NativeExporterPlugin extends Plugin {
   private File output;
   private final List<Bitmap> bitmaps = new ArrayList<>();
   private Runnable progressPoll;
+  private boolean keepFinished;
 
   private File sourceFile(String uri) throws Exception {
     File file = new File(Uri.parse(uri).getPath()).getCanonicalFile();
@@ -103,14 +103,12 @@ public class NativeExporterPlugin extends Plugin {
     processors.add(new ExportGainProcessor((float)source.getDouble("volume"),
       source.optDouble("fadeIn"), source.optDouble("fadeOut"), source.getDouble("duration"), speed));
     List<Effect> visual = new ArrayList<>();
+    if (!image) new ExportSpeed(speed, source.optBoolean("keepPitch", true)).append(processors, visual, audioOnly);
     if (!audioOnly) visual.add(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_STRETCH_TO_FIT));
     EditedMediaItem.Builder builder = new EditedMediaItem.Builder(media.build())
       .setRemoveVideo(audioOnly).setEffects(new Effects(processors, visual));
     if (image) builder.setFrameRate(fps);
-    else builder.setSpeed(new SpeedProvider() {
-      @Override public float getSpeed(long presentationTimeUs) { return speed; }
-      @Override public long getNextSpeedChangeTimeUs(long timeUs) { return C.TIME_UNSET; }
-    });
+
     return builder.build();
   }
 
@@ -171,7 +169,10 @@ public class NativeExporterPlugin extends Plugin {
           Composition.Builder composition = new Composition.Builder(sequences);
           if (!overlays.isEmpty()) composition.setEffects(new Effects(ImmutableList.of(), ImmutableList.of(new OverlayEffect(overlays))));
           Composition ready = composition.build();
-          output = File.createTempFile("clipnova-export-", ".mp4", getContext().getCacheDir());
+          File retained = new File(getContext().getFilesDir(), "clipnova-outputs");
+          if (!retained.isDirectory() && !retained.mkdirs()) throw new Exception("Cannot create retained output directory");
+          output = File.createTempFile("ClipNova-", ".mp4", retained);
+          keepFinished = false;
           if (!output.delete()) throw new Exception("Cannot prepare export output");
           boolean requiredAudio = expectAudio;
           main.post(() -> start(call, plan, ready, requiredAudio));
@@ -192,9 +193,9 @@ public class NativeExporterPlugin extends Plugin {
                 if (cancelled) throw new Exception("Export cancelled");
                 JSObject verified = ExportFileInspector.inspect(output, plan.getDouble("duration"), expectAudio, plan.optBoolean("expectMotion"));
                 if (cancelled) throw new Exception("Export cancelled");
-                String name = plan.getString("name").replaceAll("[^a-zA-Z0-9_.-]", "_");
-                Uri uri = publish(output, name);
-                verified.put("uri", uri.toString()); verified.put("name", name);
+                // Keep the verified file until explicit discard. The shared MediaSaver handles publication.
+                keepFinished = true;
+                verified.put("uri", Uri.fromFile(output).toString()); verified.put("name", output.getName());
                 main.post(() -> {
                   if (activeCall == call) { cleanup(); call.resolve(verified); }
                 });
@@ -219,42 +220,6 @@ public class NativeExporterPlugin extends Plugin {
       };
       main.post(progressPoll);
     } catch (Exception e) { fail(call, e); }
-  }
-
-  private Uri publish(File file, String name) throws Exception {
-    ContentValues values = new ContentValues();
-    values.put(MediaStore.Video.Media.DISPLAY_NAME, name);
-    values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-    values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ClipNova");
-    values.put(MediaStore.Video.Media.IS_PENDING, 1);
-    Uri uri = getContext().getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
-    if (uri == null) throw new Exception("MediaStore insert failed");
-    boolean committed = false;
-    try {
-      long count = 0;
-      try (FileInputStream in = new FileInputStream(file);
-           OutputStream out = getContext().getContentResolver().openOutputStream(uri)) {
-        if (out == null) throw new Exception("MediaStore stream unavailable");
-        byte[] buffer = new byte[64 * 1024];
-        int n;
-        while ((n = in.read(buffer)) >= 0) {
-          if (cancelled) throw new Exception("Export cancelled");
-          out.write(buffer, 0, n); count += n;
-        }
-        out.flush();
-      }
-      if (count != file.length()) throw new Exception("Saved byte count mismatch");
-      try (android.os.ParcelFileDescriptor fd = getContext().getContentResolver().openFileDescriptor(uri, "r")) {
-        if (fd == null || fd.getStatSize() != file.length()) throw new Exception("Saved file size verification failed");
-      }
-      if (cancelled) throw new Exception("Export cancelled");
-      ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0);
-      if (getContext().getContentResolver().update(uri, done, null, null) != 1) throw new Exception("MediaStore publish failed");
-      committed = true; return uri;
-    } finally { if (!committed) {
-      int removed = getContext().getContentResolver().delete(uri, null, null);
-      recordCleanup(uri.toString(), "NativeExporter.publish.rollback", removed > 0);
-    } }
   }
 
   @PluginMethod public void cancel(PluginCall call) {
@@ -296,7 +261,7 @@ public class NativeExporterPlugin extends Plugin {
     if (transformer != null) { transformer.cancel(); transformer = null; }
     for (Bitmap bitmap : bitmaps) if (!bitmap.isRecycled()) bitmap.recycle();
     bitmaps.clear();
-    if (output != null) { recordCleanup(output.getPath(), "NativeExporter.cleanup", output.delete()); output = null; }
+    if (output != null) { if (!keepFinished) recordCleanup(output.getPath(), "NativeExporter.cleanup", output.delete()); output = null; }
     activeCall = null;
   }
   @Override protected void handleOnDestroy() {
