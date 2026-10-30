@@ -239,3 +239,24 @@ test('project open upgrades legacy raw Files to owned byte records', async ({ pa
   });
   expect(result).toEqual({ missing: 0, legacy: false, name: 'original.webm', size: 18, text: 'legacy-owned-bytes' });
 });
+
+test('source diagnostics do not mark a completed export as crashed on reopen', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const path = '/src/utils/crashTrace.ts';
+    const { trace, clearTrace, exportFinished } = await import(path);
+    clearTrace();
+    trace('source-check', 'opened source before any export');
+    const noExportCrash = exportFinished();
+    trace('export-started', 'test');
+    trace('export-finished', 'verified');
+    trace('source-check', 'reopened project');
+    const stillFinished = exportFinished();
+    trace('export-started', 'interrupted');
+    for (let i = 0; i < 205; i++) trace('source-check', 'buffer entry ' + i);
+    const stillRunning = !exportFinished();
+    clearTrace();
+    return { noExportCrash, stillFinished, stillRunning };
+  });
+  expect(result).toEqual({ noExportCrash: true, stillFinished: true, stillRunning: true });
+});
