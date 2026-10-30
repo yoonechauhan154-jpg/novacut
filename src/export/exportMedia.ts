@@ -162,12 +162,7 @@ export async function advanceVideo(el: HTMLVideoElement, target: number, fps: nu
   el.dataset.exportTime = String(target);
 }
 
-export function clipSourceTime(clip: TimelineClip, time: number, sourceDuration: number) {
-  const offset = Math.max(0, time - clip.startTime) * clip.speed;
-  const source = clip.frozen ? clip.sourceStart :
-    clip.reversed ? clip.sourceEnd - offset : clip.sourceStart + offset;
-  return Math.max(0, Math.min(source, Math.max(0, sourceDuration - 0.001)));
-}
+export { clipSourceTime } from '../utils/clipTiming';
 
 export async function createExportMedia(project: ProjectData, cancel: CancelFlag, log: Diagnostic, lazy = false) {
   const media = new Map<string, HTMLVideoElement | HTMLImageElement>();

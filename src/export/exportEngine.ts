@@ -1,3 +1,4 @@
+import { stretchClipAudio } from './audioStretch';
 import { createExportMedia, seekVideo } from './exportMedia';
 import labVideoUrl from '../../test-assets/test-5s.mp4?url';
 import { createBaseClip } from '../data/presets';
@@ -245,7 +246,7 @@ export async function renderProjectAudio(
 
   for (const clip of project.clips) {
     if (clip.trackType !== 'audio' && clip.trackType !== 'video') continue;
-    if (clip.muted) continue;
+    if (clip.muted || clip.frozen) continue;
 
     if (!clip.mediaUrl) {
       if (clip.trackType === 'audio') throw new Error('Synthetic audio export is not implemented');
@@ -263,8 +264,8 @@ export async function renderProjectAudio(
     hasAnyAudio = true;
 
     const source = offline.createBufferSource();
-    source.buffer = buffer;
-    source.playbackRate.value = clip.speed || 1;
+    source.buffer = await stretchClipAudio(buffer, clip, offline);
+    source.playbackRate.value = 1;
 
     const gain = offline.createGain();
     const vol = Math.max(0, Math.min(2, (clip.volume ?? 100) / 100));
@@ -283,8 +284,7 @@ export async function renderProjectAudio(
     source.connect(gain);
     gain.connect(offline.destination);
 
-    const startOffset = Math.max(0, clip.sourceStart || 0);
-    source.start(clip.startTime, startOffset, clip.duration * clip.speed);
+    source.start(clip.startTime, 0, clip.duration);
     source.stop(clip.startTime + clip.duration);
   }
 

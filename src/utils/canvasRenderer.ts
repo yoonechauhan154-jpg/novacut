@@ -1,3 +1,4 @@
+import { clipSourceTime } from './clipTiming';
 import { FILTER_PRESETS } from '../data/presets';
 import {
   AspectRatioKey,
@@ -665,18 +666,7 @@ export function renderProjectFrame(
 
   for (const clip of activeClips) {
     const rawOffset = playheadTime - clip.startTime;
-    let effectiveOffset =
-      clip.frozen || clip.effect === 'freeze' ? clip.inPoint : rawOffset * clip.speed;
-
-    if (clip.speedCurve === 'montage' || clip.effect === 'speed-ramp') {
-      effectiveOffset = rawOffset * (1 + Math.sin(rawOffset * 3.5) * 0.65);
-    } else if (clip.speedCurve === 'hero-bullet') {
-      effectiveOffset = rawOffset < clip.duration * 0.4 ? rawOffset * 1.8 : rawOffset * 0.35;
-    }
-
-    if (clip.reversed) {
-      effectiveOffset = Math.max(0, clip.duration - effectiveOffset);
-    }
+    const effectiveOffset = clipSourceTime(clip, playheadTime);
 
     const kf = interpolateKeyframes(clip.keyframes, rawOffset, {
       scale: clip.scale,
@@ -840,8 +830,8 @@ export function renderProjectFrame(
             // Source time = sourceStart + (timelineTime - startTime) * speed.
             if (!isPlaying) {
               const relTime = playheadTime - clip.startTime;
-              const targetTime = (clip.sourceStart + relTime * clip.speed) % Math.max(0.5, el.duration || clip.duration);
-              if (Math.abs(el.currentTime - targetTime) > 0.28) {
+              const targetTime = clipSourceTime(clip, playheadTime, el.duration || Infinity);
+              if (!el.seeking && Math.abs(el.currentTime - targetTime) > 1 / 60) {
                 el.currentTime = targetTime;
               }
             }

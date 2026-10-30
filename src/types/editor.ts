@@ -167,6 +167,7 @@ export interface TimelineClip {
   thumbnailUrl?: string;
   // Transform & playback
   speed: number; // 0.1 to 10
+  keepPitch?: boolean; // defaults true; false changes pitch with speed
   speedCurve: SpeedCurvePreset;
   smoothSlowMo?: boolean;
   reversed: boolean;

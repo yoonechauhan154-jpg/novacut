@@ -53,7 +53,12 @@ export async function encodeRecorder(opts: ExportOptions, log: (step: string, de
         if (!active.has(clip.id) || Math.abs(el.currentTime - target) > 0.25 || clip.reversed || clip.frozen)
           await seekVideo(el, target, cancelRef, log);
         active.add(clip.id);
-        if (!clip.frozen && !clip.reversed) { el.playbackRate = Math.max(0.0625, clip.speed); await el.play(); }
+        if (!clip.frozen && !clip.reversed) {
+          let supported = true;
+          try { el.playbackRate = clip.speed; } catch { supported = false; }
+          if (supported) await el.play();
+          else await seekVideo(el, target, cancelRef, log);
+        }
       }
       renderProjectFrame(ctx, project, time, resources.media, 'export-full', true);
     };
