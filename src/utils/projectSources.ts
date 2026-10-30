@@ -57,6 +57,11 @@ export async function resolveProjectSources(project: ProjectData, purpose: 'open
       let url = source.url, nativeUri: string | undefined, id = source.blobId;
       try {
         record = source.blobId ? await loadMediaRecord(source.blobId) : null;
+        if (purpose === 'open' && id && record?.blob && (record.legacy || Capacitor.isNativePlatform())) {
+          // Upgrade old picker Files while readable; exports never perform this write.
+          await saveMediaBlobToIdb(id, new File([record.blob], record.name, { type: record.type }));
+          record = await loadMediaRecord(id);
+        }
         // Migrate readable legacy URL-only projects on open, never during an export.
         if (!record && purpose === 'open' && original.exists) {
           const response = await fetch(/^(file|content):/.test(url || '') ? Capacitor.convertFileSrc(url!) : url!);
@@ -80,7 +85,7 @@ export async function resolveProjectSources(project: ProjectData, purpose: 'open
         if (!resolved.exists) throw new Error('Source unreadable: ' + resolved.error);
         log('source-check', JSON.stringify({ purpose, key, name: source.name, original, resolved,
           durable: !!record, size: record?.size || resolved.size, type: record?.type, path: record?.path, nativeUri,
-          ownCleanup: [...audit, ...getMediaAudit().filter(e => e.resource === record?.path)] }));
+          ownCleanup: [...audit, ...getMediaAudit().filter(e => (e.resource === record?.path || (!!record?.path && e.resource.endsWith('/' + record.path))))] }));
         for (const c of clips) if ((c.mediaBlobId || c.mediaUrl || c.id) === key) {
           c.mediaUrl = url; c.mediaBlobId = id; c.mediaNativeUri = nativeUri;
         }
@@ -91,7 +96,7 @@ export async function resolveProjectSources(project: ProjectData, purpose: 'open
       } catch (error) {
         missing.push({ key, ...source });
         log('source-missing', JSON.stringify({ purpose, key, name: source.name, original, size: record?.size,
-          path: record?.path, error: String(error), ownCleanup: [...audit, ...getMediaAudit().filter(e => e.resource === record?.path)] }));
+          path: record?.path, error: String(error), ownCleanup: [...audit, ...getMediaAudit().filter(e => (e.resource === record?.path || (!!record?.path && e.resource.endsWith('/' + record.path))))] }));
       }
     }
     if (cancel.current) throw new DOMException('Export cancelled', 'AbortError');

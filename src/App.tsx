@@ -329,6 +329,7 @@ export function App() {
   const exportBusyRef = useRef(false);
   const [missingSources, setMissingSources] = useState<MissingSource[]>([]);
   const [sourcesOpening, setSourcesOpening] = useState(false);
+  const sourcesBusyRef = useRef(false);
   const sourceOpenGeneration = useRef(0);
   const openSourceLeaseRef = useRef<Awaited<ReturnType<typeof resolveProjectSources>> | null>(null);
   const relinkInputRef = useRef<HTMLInputElement | null>(null);
@@ -737,7 +738,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   // Uses requestVideoFrameCallback when available, falls back to requestAnimationFrame.
   // Only ONE loop runs; cancelled on pause/unmount. No per-frame React re-renders.
   useEffect(() => {
-    if (screen !== 'editor' || isExportingVideo || exportBusyRef.current) {
+    if (screen !== 'editor' || isExportingVideo || exportBusyRef.current || sourcesBusyRef.current) {
       if (renderRafRef.current) {
         cancelAnimationFrame(renderRafRef.current);
         renderRafRef.current = null;
@@ -758,7 +759,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     let rafId: number | null = null;
 
     const step = (now: number) => {
-      if (exportBusyRef.current) return;
+      if (exportBusyRef.current || sourcesBusyRef.current) return;
       const dt = (now - lastTs) / 1000;
       lastTs = now;
 
@@ -1114,7 +1115,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [isPlaying, project, totalDuration, screen, isExportingVideo]);
+  }, [isPlaying, project, totalDuration, screen, isExportingVideo, sourcesOpening]);
 
   // History-aware project updater
   const updateProjectWithHistory = useCallback((updater: (prev: ProjectData) => ProjectData) => {
@@ -1177,6 +1178,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
   const openEditorWithProject = async (proj: ProjectData) => {
     const generation = ++sourceOpenGeneration.current;
+    sourcesBusyRef.current = true;
     setSourcesOpening(true); setIsPlaying(false); soundEngine.stopAllAudio();
     try {
       const lease = await resolveProjectSources(proj, 'open', logExport);
@@ -1193,20 +1195,26 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     } catch (error) {
       triggerToast('Source check failed: ' + String(error), 'स्रोत की जाँच विफल: ' + String(error));
     } finally {
-      if (generation === sourceOpenGeneration.current) { setSourcesOpening(false); setExportLog(getExportLog()); }
+      if (generation === sourceOpenGeneration.current) { sourcesBusyRef.current = false; setSourcesOpening(false); setExportLog(getExportLog()); }
     }
   };
   const handleRelinkSource = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0], target = relinkTargetRef.current;
     event.target.value = '';
     if (!file || !target) return;
+    sourcesBusyRef.current = true;
+    setSourcesOpening(true); setIsPlaying(false); soundEngine.stopAllAudio();
+    logExport('source-relink-start', JSON.stringify({ name: file.name, size: file.size, type: file.type, key: target.key }));
     try {
       const updated = await relinkProjectSource(project, target, file);
       await saveProjectToStorage(updated);
       await openEditorWithProject(updated);
       triggerToast('Source relinked. Edits retained.', 'स्रोत दोबारा लिंक हुआ। संपादन सुरक्षित हैं।');
     } catch (error) {
+      logExport('source-relink-failed', String(error));
       triggerToast('Relink failed: ' + String(error), 'दोबारा लिंक करना विफल: ' + String(error));
+    } finally {
+      sourcesBusyRef.current = false; setSourcesOpening(false); setExportLog(getExportLog());
     }
   };
 
@@ -2619,7 +2627,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             <span className="flex-1 text-sm">{lang === 'hi'
               ? 'स्रोत गायब है: ' + source.name + '। दोबारा लिंक करें'
               : 'Source ' + source.kind + ' missing: ' + source.name + '. Tap to relink'}</span>
-            <button type="button" className="min-h-[44px] px-3 border rounded" onClick={() => {
+            <button type="button" className="min-h-[44px] px-3 border rounded" disabled={sourcesOpening} onClick={() => {
               relinkTargetRef.current = source; relinkInputRef.current?.click();
             }}>{lang === 'hi' ? 'दोबारा लिंक करें' : 'Relink'}</button>
           </div>)}

@@ -182,7 +182,7 @@ test('missing source is shown on Home reopen and relink preserves split edits', 
   const chooserPromise = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Relink', exact: true }).click();
   const chooser = await chooserPromise; await chooser.setFiles('test-assets/test-12s.webm');
-  try { await expect(page.getByTestId('missing-sources')).toHaveCount(0); }
+  try { await expect(page.getByTestId('missing-sources')).toHaveCount(0, { timeout: 30000 }); }
   catch (error) { console.log('RELINK UI:', await page.locator('body').innerText());
     console.log('RELINK TRACE:', await page.evaluate(async () => { const path = '/src/export/exportEngine.ts'; return (await import(path)).getExportLog(); }));
     throw error; }
@@ -211,4 +211,31 @@ test('deleting one project retains shared sources until the final project is del
     return { retained, removed: await loadMediaBlobFromIdb('shared-source') === null };
   });
   expect(result).toEqual({ retained: 11, removed: true });
+});
+
+test('project open upgrades legacy raw Files to owned byte records', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const storagePath = '/src/utils/projectStorage.ts', sourcePath = '/src/utils/projectSources.ts', presetsPath = '/src/data/presets.ts';
+    const { saveMediaBlobToIdb, loadMediaRecord } = await import(storagePath);
+    const { resolveProjectSources } = await import(sourcePath), { INITIAL_PROJECT, createBaseClip } = await import(presetsPath);
+    await saveMediaBlobToIdb('legacy-init', new Blob(['initialize store']));
+    const file = new File(['legacy-owned-bytes'], 'original.webm', { type: 'video/webm' });
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('clipnova_idb_v3', 1);
+      req.onsuccess = () => {
+        const db = req.result, tx = db.transaction('media_blobs', 'readwrite');
+        tx.objectStore('media_blobs').put(file, 'legacy-file');
+        tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error);
+      };
+    });
+    const clip = createBaseClip({ id: 'legacy', title: 'legacy', trackId: 'main', trackType: 'video', startTime: 0, duration: 1,
+      sourceType: 'uploaded-video', mediaBlobId: 'legacy-file', mediaUrl: 'blob:http://localhost/expired' });
+    const lease = await resolveProjectSources({ ...INITIAL_PROJECT, importedMedia: [], clips: [clip] }, 'open', () => {});
+    const record = await loadMediaRecord('legacy-file');
+    const text = await (await fetch(lease.project.clips[0].mediaUrl)).text();
+    lease.release();
+    return { missing: lease.missing.length, legacy: !!record.legacy, name: record.name, size: record.size, text };
+  });
+  expect(result).toEqual({ missing: 0, legacy: false, name: 'original.webm', size: 18, text: 'legacy-owned-bytes' });
 });

@@ -42,7 +42,7 @@ export function isValidProjectData(item: unknown): item is ProjectData {
 }
 
 export interface StoredMedia {
-  version: 1; name: string; size: number; type: string; blob?: Blob; path?: string;
+  version: 1; name: string; size: number; type: string; blob?: Blob; path?: string; legacy?: boolean;
 }
 export async function loadMediaRecord(blobId: string): Promise<StoredMedia | null> {
   const db = await openDatabase();
@@ -52,7 +52,7 @@ export async function loadMediaRecord(blobId: string): Promise<StoredMedia | nul
       req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
     });
     // Old databases store a raw File/Blob. Keep them readable for migration/relink.
-    if (value instanceof Blob) return { version: 1, blob: value, size: value.size, type: value.type,
+    if (value instanceof Blob) return { version: 1, legacy: true, blob: value, size: value.size, type: value.type,
       name: value instanceof File ? value.name : blobId };
     return value || null;
   } finally { db.close(); }
