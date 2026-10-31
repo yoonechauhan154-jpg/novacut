@@ -355,8 +355,9 @@ export async function publishExportPath(path: string, name: string, mimeType: st
     const options = { path: path.replace(/^file:\/\//, ''), displayName: name, mimeType, expectedSize: size };
     if (saveAs && !saver.saveAs) throw new Error('Save as is unavailable in this Android build');
     const saved = saveAs ? await saver.saveAs!(options) : await saver.saveVideo(options);
+    const relativePath = 'relativePath' in saved && typeof saved.relativePath === 'string' ? saved.relativePath : undefined;
     Object.assign(diagnostic, { uri: saved.uri, bytesWritten: saved.size, apiLevel: saved.sdkInt, method: saved.method,
-      requestedDisplayName: name, displayName: 'relativePath' in saved ? saved.relativePath?.split('/').pop() || name : name });
+      requestedDisplayName: name, displayName: relativePath?.split('/').pop() || name });
     if (!saved.uri) throw new Error('MediaStore did not return a saved file URI');
     if (saved.size !== size) throw new Error('Save byte count mismatch: expected ' + size + ', wrote ' + saved.size);
     const query = await saver.verifySize({ uri: saved.uri, expectedSize: size });
@@ -364,7 +365,7 @@ export async function publishExportPath(path: string, name: string, mimeType: st
     if (!query.verified || query.actualSize !== size || query.exists !== true || query.pending !== 0)
       throw new Error('Saved file is not published or size mismatch: ' + JSON.stringify(query));
     Object.assign(result, { saved: true, verified: true, uri: saved.uri, sdkInt: Number(saved.sdkInt),
-      method: saved.method || result.method, relativePath: 'relativePath' in saved ? saved.relativePath : saved.uri });
+      method: saved.method || result.method, relativePath: relativePath || saved.uri });
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     diagnostic.exception = result.error;
