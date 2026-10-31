@@ -6,6 +6,7 @@
 import { Capacitor } from '@capacitor/core';
 
 const TRACE_KEY = 'clipnova_export_trace';
+const EXPORT_STATE_KEY = 'clipnova_export_activity_v1';
 const MAX_LINES = 200;
 
 interface TraceLine {
@@ -34,6 +35,11 @@ function writeTrace(lines: TraceLine[]): void {
 }
 
 export function trace(step: string, detail: string): void {
+  // Only lifecycle events change recovery state; source checks and Lab logs are not crashes.
+  try {
+    if (step === 'export-started' || step === 'renderer-crashed') localStorage.setItem(EXPORT_STATE_KEY, 'running');
+    else if (step === 'export-finished') localStorage.setItem(EXPORT_STATE_KEY, 'finished');
+  } catch {}
   const line: TraceLine = { ts: Date.now(), step, detail };
   const lines = readTrace();
   lines.push(line);
@@ -47,7 +53,7 @@ export function getTrace(): TraceLine[] {
 }
 
 export function clearTrace(): void {
-  try { localStorage.removeItem(TRACE_KEY); } catch {}
+  try { localStorage.removeItem(TRACE_KEY); localStorage.removeItem(EXPORT_STATE_KEY); } catch {}
 }
 
 export function lastStep(): string | null {
@@ -57,10 +63,19 @@ export function lastStep(): string | null {
 }
 
 export function exportFinished(): boolean {
+  try {
+    const state = localStorage.getItem(EXPORT_STATE_KEY);
+    if (state === 'running') return false;
+    if (state === 'finished') return true;
+  } catch {}
+  // Upgrade an existing breadcrumb history. Ignore source diagnostics written outside export.
   const lines = readTrace();
-  if (lines.length === 0) return false;
-  const last = lines[lines.length - 1];
-  return last.step === 'export-finished';
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].step === 'export-finished') return true;
+    if (lines[i].step === 'export-started' || lines[i].step === 'renderer-crashed') return false;
+  }
+  // An older export may have filled the ring buffer and evicted its start marker.
+  return !lines.some(line => /^(frame|seek-failed|audio-render|webview-failed|fallback|mux-done)$/.test(line.step));
 }
 
 /* ------------------------------------------------------------------ */

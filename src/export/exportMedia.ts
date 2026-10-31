@@ -1,0 +1,205 @@
+import type { ProjectData, TimelineClip } from '../types/editor';
+
+export type CancelFlag = { current: boolean };
+export type Diagnostic = (step: string, detail: string) => void;
+export const abortIfCancelled = (flag: CancelFlag) => {
+  if (flag.current) throw new DOMException('Export cancelled', 'AbortError');
+};
+
+export function mediaDiagnostic(el: HTMLVideoElement, target: number, reason: string) {
+  const ranges = (r: TimeRanges) => Array.from({ length: r.length }, (_, i) => [r.start(i), r.end(i)]);
+  const src = el.currentSrc || el.src;
+  return JSON.stringify({
+    reason, element: el.dataset.exportClipId || el.id, srcType: src.split(':')[0],
+    attached: el.isConnected, readyState: el.readyState, networkState: el.networkState,
+    error: el.error && { code: el.error.code, message: el.error.message },
+    seekable: ranges(el.seekable), buffered: ranges(el.buffered), seeking: el.seeking,
+    currentTime: el.currentTime, target, duration: el.duration, paused: el.paused, ended: el.ended,
+    width: el.videoWidth, height: el.videoHeight,
+  });
+}
+
+export function attachExportVideo(id: string) {
+  const el = document.createElement('video');
+  el.dataset.exportClipId = id;
+  el.muted = true;
+  el.playsInline = true;
+  el.preload = 'auto';
+  // In the viewport and laid out: display:none/offscreen decoding can stall in WebView.
+  el.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:0';
+  el.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(el);
+  return el;
+}
+
+export async function loadVideo(el: HTMLVideoElement, src: string, cancel: CancelFlag, log: Diagnostic) {
+  await new Promise<void>((resolve, reject) => {
+    const end = (error?: Error) => {
+      clearInterval(timer);
+      el.removeEventListener('loadeddata', ready);
+      el.removeEventListener('error', failed);
+      error ? reject(error) : resolve();
+    };
+    const ready = () => { if (el.readyState >= 2) end(); };
+    const failed = () => {
+      const detail = mediaDiagnostic(el, 0, 'load failed');
+      log('media-load-failed', detail); end(new Error(detail));
+    };
+    const deadline = performance.now() + 15000;
+    const timer = setInterval(() => {
+      if (cancel.current) end(new DOMException('Export cancelled', 'AbortError'));
+      else if (performance.now() > deadline) failed();
+    }, 50);
+    el.addEventListener('loadeddata', ready);
+    el.addEventListener('error', failed);
+    el.src = src;
+    el.load();
+  });
+}
+
+/** Register every callback before changing currentTime. A clock assignment is not a decoded frame. */
+export async function seekVideo(el: HTMLVideoElement, target: number, cancel: CancelFlag, log: Diagnostic, timeout = 5000) {
+  abortIfCancelled(cancel);
+  el.pause();
+  if (!Number.isFinite(el.currentTime) || !Number.isFinite(target)) {
+    const detail = mediaDiagnostic(el, target, 'invalid media clock');
+    log('seek-failed', detail); throw new Error(detail);
+  }
+  target = Math.max(0, Math.min(target, Number.isFinite(el.duration) ? Math.max(0, el.duration - 0.001) : target));
+  if (!el.seeking && el.readyState >= 2 && Math.abs(el.currentTime - target) < 0.0005) return;
+  await new Promise<void>((resolve, reject) => {
+    let callback = 0;
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true; clearInterval(timer);
+      el.removeEventListener('seeked', onSeeked); el.removeEventListener('error', onError);
+      if (callback) el.cancelVideoFrameCallback(callback);
+      err ? reject(err) : resolve();
+    };
+    const fail = (reason: string) => {
+      const detail = mediaDiagnostic(el, target, reason); log('seek-failed', detail);
+      finish(new Error(detail));
+    };
+    const onError = () => fail('decoder error');
+    const effectiveTarget = () => Number.isFinite(el.duration) ? Math.min(target, Math.max(0, el.duration - .001)) : target;
+    const onSeeked = () => {
+      // WebM may discover a finite duration only after seeking to its last cluster.
+      // seeked guarantees current decoded data; rVFC below also catches WebView presentation.
+      if (el.readyState >= 2 && !el.seeking && Math.abs(el.currentTime - effectiveTarget()) < 0.05) finish();
+    };
+    const deadline = performance.now() + timeout;
+    const timer = setInterval(() => {
+      if (cancel.current) finish(new DOMException('Export cancelled', 'AbortError'));
+      else if (performance.now() > deadline) fail('seek timeout');
+    }, 25);
+    el.addEventListener('seeked', onSeeked);
+    el.addEventListener('error', onError);
+    if (typeof el.requestVideoFrameCallback === 'function') {
+      callback = el.requestVideoFrameCallback((_now, meta) => {
+        if (!el.seeking && Math.abs(meta.mediaTime - effectiveTarget()) < 0.08) finish();
+      });
+    }
+    try { el.currentTime = target; } catch (e) { fail(String(e)); }
+  });
+}
+
+/** Consecutive forward frames use decoder playback, with seeks only for cuts/discontinuities. */
+export async function advanceVideo(el: HTMLVideoElement, target: number, fps: number, cancel: CancelFlag, log: Diagnostic, timeout = 5000) {
+  abortIfCancelled(cancel);
+  const previous = Number(el.dataset.exportTime ?? NaN);
+  // There may be no later presentation callback at EOF, especially with VFR footage.
+  // Also rewind before playback if the decoder clock has already passed this output slot.
+  const nearEnd = Number.isFinite(el.duration) && target >= el.duration - Math.max(.25, 3 / fps);
+  if (!Number.isFinite(previous) || target < previous || target - previous > 0.5 ||
+      !Number.isFinite(el.currentTime) || el.currentTime >= target || el.ended || nearEnd ||
+      typeof el.requestVideoFrameCallback !== 'function') {
+    await seekVideo(el, target, cancel, log, timeout);
+  } else if (target > previous + 0.0001) {
+    const recovery = await new Promise<boolean>((resolve, reject) => {
+      let callback = 0, settled = false;
+      const finish = (recover: boolean, err?: Error) => {
+        if (settled) return; settled = true; clearInterval(timer);
+        el.removeEventListener('ended', onEnded);
+        el.removeEventListener('error', onError);
+        if (callback) el.cancelVideoFrameCallback(callback);
+        el.pause(); err ? reject(err) : resolve(recover);
+      };
+      const recover = (reason: string) => {
+        if (settled) return;
+        log('frame-recovery', mediaDiagnostic(el, target, reason));
+        finish(true);
+      };
+      const onEnded = () => recover('playback ended before requested frame callback; seeking requested time');
+      const onError = () => {
+        const detail = mediaDiagnostic(el, target, 'decoder error');
+        log('seek-failed', detail); finish(false, new Error(detail));
+      };
+      const deadline = performance.now() + timeout;
+      const timer = setInterval(() => {
+        if (cancel.current) finish(false, new DOMException('Export cancelled', 'AbortError'));
+        else if (el.ended) onEnded();
+        else if (performance.now() > deadline) recover('playback frame timeout; seeking requested time');
+      }, 25);
+      const frame: VideoFrameRequestCallback = (_now, meta) => {
+        if (settled) return;
+        if (cancel.current) { finish(false, new DOMException('Export cancelled', 'AbortError')); return; }
+        if (meta.mediaTime >= target - 0.5 / fps) finish(false);
+        else callback = el.requestVideoFrameCallback(frame);
+      };
+      el.addEventListener('ended', onEnded);
+      el.addEventListener('error', onError);
+      callback = el.requestVideoFrameCallback(frame);
+      el.playbackRate = 1;
+      void el.play().catch(err => finish(false, err));
+    });
+    // A recovery is one bounded seek, not permission to reuse a stale final frame.
+    // Failure or cancellation in that seek still aborts the export with diagnostics.
+    if (recovery || Math.abs(el.currentTime - target) > Math.max(0.08, 2 / fps))
+      await seekVideo(el, target, cancel, log, timeout);
+  }
+  abortIfCancelled(cancel);
+  el.dataset.exportTime = String(target);
+}
+
+export { clipSourceTime } from '../utils/clipTiming';
+
+export async function createExportMedia(project: ProjectData, cancel: CancelFlag, log: Diagnostic, lazy = false) {
+  const media = new Map<string, HTMLVideoElement | HTMLImageElement>();
+  const audio = new Map<string, HTMLAudioElement>();
+  const dispose = () => {
+    for (const el of [...media.values(), ...audio.values()]) {
+      if (el instanceof HTMLMediaElement) { el.pause(); el.removeAttribute('src'); el.load(); }
+      el.remove();
+    }
+    media.clear(); audio.clear();
+  };
+  try {
+    // Separate element per clip, including split clips that share one preview element.
+    for (const clip of project.clips) {
+      abortIfCancelled(cancel);
+      if (!clip.mediaUrl) continue;
+      if (clip.sourceType === 'uploaded-video') {
+        const el = attachExportVideo(clip.id); media.set(clip.id, el);
+        if (!lazy) await loadVideo(el, clip.mediaUrl, cancel, log);
+      } else if (clip.sourceType === 'uploaded-image') {
+        const el = new Image(); media.set(clip.id, el); el.src = clip.mediaUrl;
+        await Promise.race([el.decode(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Image decode timeout')), 15000))]);
+      } else if (clip.sourceType === 'uploaded-audio') {
+        const el = new Audio(); el.preload = 'none'; el.src = clip.mediaUrl; audio.set(clip.id, el);
+      }
+    }
+    const prepare = async (time: number) => {
+      for (const clip of project.clips) {
+        const el = media.get(clip.id);
+        if (!(el instanceof HTMLVideoElement) || !clip.mediaUrl) continue;
+        const active = !clip.muted && time >= clip.startTime && time < clip.startTime + clip.duration;
+        if (active && !el.getAttribute('src')) await loadVideo(el, clip.mediaUrl, cancel, log);
+        else if (!active && el.getAttribute('src')) {
+          el.pause(); el.removeAttribute('src'); el.load(); delete el.dataset.exportTime;
+        }
+      }
+    };
+    return { media, audio, dispose, prepare };
+  } catch (err) { dispose(); throw err; }
+}

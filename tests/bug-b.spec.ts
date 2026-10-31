@@ -216,16 +216,16 @@ test('BUG B: no audio echo after pause', async ({ page }) => {
   );
 
   const anyPlaying = samples.some((s) => s.playingCount > 0);
-  expect(anyPlaying).toBe(false, `Found playing media after pause: ${JSON.stringify(samples.filter(s => s.playingCount > 0))}`);
+  expect(anyPlaying, `Found playing media after pause: ${JSON.stringify(samples.filter(s => s.playingCount > 0))}`).toBe(false);
 
   const anySources = samples.some((s) => s.activeSources > 0);
-  expect(anySources).toBe(false, `Found active audio sources after pause: ${JSON.stringify(samples.filter(s => s.activeSources > 0))}`);
+  expect(anySources, `Found active audio sources after pause: ${JSON.stringify(samples.filter(s => s.activeSources > 0))}`).toBe(false);
 
   const allSuspended = samples.every((s) => s.ctxSuspended);
-  expect(allSuspended).toBe(true, `AudioContext not suspended after pause`);
+  expect(allSuspended, `AudioContext not suspended after pause`).toBe(true);
 
   console.log('BUG B samples:', JSON.stringify(samples));
   console.log('BUG B forbidden events after pause:', JSON.stringify(forbiddenAfterPause.slice(0,10)));
 
-  expect(forbiddenAfterPause.length).toBe(0, `Forbidden events after pause: ${JSON.stringify(forbiddenAfterPause.slice(0,10))}`);
+  expect(forbiddenAfterPause.length, `Forbidden events after pause: ${JSON.stringify(forbiddenAfterPause.slice(0,10))}`).toBe(0);
 });
