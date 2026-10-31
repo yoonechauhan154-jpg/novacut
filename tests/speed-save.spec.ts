@@ -306,3 +306,25 @@ test('WebCodecs high speed advances through decoded source frames', async ({ pag
   expect(new Set(hashes).size).toBeGreaterThan(27);
   await info.attach('ffprobe-10x', { body: JSON.stringify(probe), contentType: 'application/json' });
 });
+
+for (const cancel of [false, true]) test('automatic system picker shows its real destination and retained status, cancel=' + cancel, async ({ page }) => {
+  await openSource(page, 1.2); await mockGallery(page);
+  await page.evaluate((cancel) => {
+    const saver = (window as any).__clipnovaSaveDependencies.mediaSaver;
+    saver.getInfo = async () => ({ sdkInt: 36 });
+    saver.saveVideo = async () => { throw new Error('Save failed: {"code":"MEDIASTORE_INSERT_FAILED","apiLevel":36,"exception":"insert failed"}'); };
+    saver.saveAs = async ({ expectedSize }: any) => {
+      if (cancel) throw new Error('Save as cancelled; finished output retained in My exports');
+      return { uri: 'content://documents/chosen-auto', size: expectedSize, method: 'document', sdkInt: 36 };
+    };
+  }, cancel);
+  await page.evaluate(async () => { await (window as any).__clipnovaSourceTest.export(); });
+  const dialog = page.getByTestId('save-status');
+  await expect(dialog).toContainText('Gallery save could not start');
+  await expect(dialog).toContainText(cancel ? 'finished output retained' : 'Saved to content://documents/chosen-auto');
+  await expect(dialog).not.toContainText('Saved to Movies/ClipNova/');
+  const entries = await page.evaluate(() => JSON.parse(localStorage.getItem('clipnova_my_exports') || '[]'));
+  expect(entries).toHaveLength(1); expect(entries[0].status).toBe(cancel ? 'failed' : 'saved');
+  expect(entries[0].retainedUri).toContain('clipnova-outputs/'); expect(entries[0].sdkInt).toBe(36);
+  expect(entries[0].diagnostics).toContain('ACTION_CREATE_DOCUMENT');
+});

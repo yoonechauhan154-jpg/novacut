@@ -108,6 +108,16 @@ public class MediaSaverPluginTest {
     Call call = new Call("saveVideo", payload); plugin.saveVideo(call); call.await();
     assertTrue(call.error, call.error.contains("MEDIASTORE_INSERT_FAILED")); assertTrue(source.isFile());
   }
+  @Test public void insertExceptionIsClassifiedWithoutDeletingInput() throws Exception {
+    provider.throwInsert = true;
+    Call call = new Call("saveVideo", payload); plugin.saveVideo(call); call.await();
+    assertTrue(call.error, call.error.contains("MEDIASTORE_INSERT_FAILED") && call.error.contains("Simulated provider rejection"));
+    assertTrue(source.isFile()); assertEquals(0, provider.deleted);
+  }
+  @Test public void deviceInfoReportsRuntimeSdk() throws Exception {
+    Call call = new Call("getInfo", new JSObject()); plugin.getInfo(call); call.await();
+    assertEquals(Build.VERSION.SDK_INT, call.value.getInt("sdkInt"));
+  }
   @Test public void rowMismatchDeletesOnlyNewOutputAndRetainsInput() throws Exception {
     provider.wrongSize = true;
     Call call = new Call("saveVideo", payload); plugin.saveVideo(call); call.await();
@@ -118,10 +128,11 @@ public class MediaSaverPluginTest {
   public static class FakeMediaProvider extends ContentProvider {
     static final class Row { File file; String name; String relativePath; int pending; }
     final Map<Uri, Row> rows = new HashMap<>();
-    boolean nullInsert, wrongSize; int deleted;
+    boolean nullInsert, wrongSize, throwInsert; int deleted;
     @Override public boolean onCreate() { return true; }
     @Override public String getType(Uri uri) { return "video/mp4"; }
     @Override public Uri insert(Uri uri, ContentValues values) {
+      if (throwInsert) throw new SecurityException("Simulated provider rejection");
       if (nullInsert) return null;
       try {
         Row row = new Row(); row.file = File.createTempFile("media-", ".mp4", getContext().getCacheDir());
