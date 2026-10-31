@@ -2213,7 +2213,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
 
   const handleStartVideoExport = async (mode: 'auto' | 'native' = 'auto') => {
-    if (exportBusyRef.current || labRunning || sourcesOpening) return;
+    if (exportBusyRef.current || labRunning || sourcesBusyRef.current) return;
     if (exportedVideoBlob && !finishedEntry?.retainedUri) {
       showRetentionError(project.name, exportedVideoBlob.size, 'Save or explicitly discard the previous finished output before rendering again.'); return;
     }
@@ -2283,9 +2283,9 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   useEffect(() => {
     if (import.meta.env.VITE_TEST_MODE !== 'true') return;
     const target = window as typeof window & { __clipnovaSourceTest?: {
-      project: ProjectData; open: typeof openEditorWithProject; export: typeof handleStartVideoExport;
+      project: ProjectData; ready: () => boolean; open: typeof openEditorWithProject; export: typeof handleStartVideoExport;
     } };
-    target.__clipnovaSourceTest = { project, open: openEditorWithProject, export: handleStartVideoExport };
+    target.__clipnovaSourceTest = { project, ready: () => !sourcesBusyRef.current && !exportBusyRef.current, open: openEditorWithProject, export: handleStartVideoExport };
     return () => { delete target.__clipnovaSourceTest; };
   });
 

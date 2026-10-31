@@ -188,8 +188,12 @@ test('automatic save publishes five decorated exports with five entries and reta
       createBaseClip({ id: 'fx', title: 'Light Leak', trackId: 'fx', trackType: 'effect-layer', sourceType: 'effect-layer',
         startTime: 0, duration: 1.2, effect: 'light-leak' })] });
   });
+  await expect.poll(() => page.evaluate(() => {
+    const app = (window as any).__clipnovaSourceTest;
+    return app?.ready() && app.project.clips.some((c: any) => c.id === 'fx');
+  })).toBe(true);
   for (let i = 0; i < 5; i++) {
-    await page.evaluate(async () => { const result = await (window as any).__clipnovaSourceTest.export(); if (!result) throw new Error('Render failed'); });
+    await page.evaluate(async () => { const result = await (window as any).__clipnovaSourceTest.export(); if (!result) { const path = '/src/export/exportEngine.ts'; throw new Error('Render failed: ' + JSON.stringify((await import(path)).getExportLog()) + document.body.innerText); } });
     await expect(page.getByTestId('save-status')).toContainText('Saved to Movies/ClipNova/');
     await page.getByRole('button', { name: 'Close', exact: true }).last().click();
   }
