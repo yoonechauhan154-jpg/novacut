@@ -20,26 +20,28 @@ interface CapacitorAppPlugin {
   exitApp?: () => Promise<void>;
 }
 
+/** Wire contract is exercised against contracts/media-save-request.json by Playwright and Robolectric. */
+export interface MediaSaveRequest {
+  path: string; displayName: string; mimeType: string; expectedSize?: number;
+}
+
 /** Custom native plugin (MediaSaverPlugin, registered in MainActivity). */
 export interface MediaSaverPlugin {
+  getInfo(): Promise<{ sdkInt: number }>;
   beginDocument(opts: { displayName: string; mimeType: string; expectedSize: number }): Promise<{ id: string; uri: string; sdkInt: number }>;
   writeDocumentChunk(opts: { id: string; data: string }): Promise<{ written: number }>;
   finishDocument(opts: { id: string }): Promise<{ uri: string; size: number; method: string; sdkInt: number }>;
   abortDocument(opts: { id: string }): Promise<void>;
-  saveVideo(opts: {
-    path: string;
-    displayName: string;
-    mimeType: string;
-    expectedSize: number;
-  }): Promise<{
+  saveVideo(opts: MediaSaveRequest): Promise<{
     uri: string;
     size: number;
-    expectedSize: number;
+    expectedSize?: number;
+    diagnostics?: Record<string, unknown>;
     relativePath: string;
     method: string;
     sdkInt: number;
   }>;
-  saveAs(opts: { path: string; displayName: string; mimeType: string; expectedSize: number }): Promise<{ uri: string; size: number; method: string; sdkInt: number }>;
+  saveAs(opts: MediaSaveRequest): Promise<{ uri: string; size: number; method: string; sdkInt: number }>;
   verifySize(opts: { uri: string; expectedSize: number }): Promise<{
     uri: string;
     actualSize: number;
@@ -306,7 +308,7 @@ export async function saveToMediaStore(
     }
 
     const uriRes = await filesystem.getUri({ path: cachePath, directory: Directory.Cache });
-    const filePath = (uriRes.uri || '').replace(/^file:\/\//, '');
+    const filePath = uriRes.uri || '';
     if (!filePath) throw new Error('Could not resolve cache file path');
 
     // 2. Native MediaStore path.
@@ -344,35 +346,66 @@ export function uniqueExportName(name: string) {
   const ext = dot >= 0 ? safe.slice(dot) : '.mp4';
   return stem + '-' + Date.now() + '-' + crypto.randomUUID().slice(0, 8) + ext;
 }
+function nativeSaveDiagnostic(error: unknown): Record<string, unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  const start = message.indexOf('{');
+  if (start >= 0) { try { return JSON.parse(message.slice(start)); } catch {} }
+  return {};
+}
 export async function publishExportPath(path: string, name: string, mimeType: string, size: number,
-  saver: Pick<MediaSaverPlugin, 'saveVideo' | 'verifySize'> & Partial<Pick<MediaSaverPlugin, 'saveAs'>>,
+  saver: Pick<MediaSaverPlugin, 'saveVideo' | 'verifySize'> & Partial<Pick<MediaSaverPlugin, 'saveAs' | 'getInfo'>>,
   saveAs = false): Promise<MediaSaveResult> {
   const diagnostic: Record<string, unknown> = { method: saveAs ? 'document' : 'mediastore', displayName: name, path, expectedSize: size };
   const result: MediaSaveResult = { saved: false, method: saveAs ? 'document' : 'mediastore', uri: null,
     size, relativePath: null, sdkInt: null, verified: false, error: null };
   try {
-    if (size <= 0) throw new Error('Finished export is empty');
-    const options = { path: path.replace(/^file:\/\//, ''), displayName: name, mimeType, expectedSize: size };
+    if (saver.getInfo) {
+      try { diagnostic.apiLevel = (await saver.getInfo()).sdkInt; }
+      catch (error) { diagnostic.deviceInfoError = String(error); }
+    }
+    if (!Number.isSafeInteger(size) || size <= 0) throw new Error('Finished export size must be a positive safe integer');
+    // Preserve raw paths; decode a file URI exactly once (including %20 and %25).
+    const localPath = path.startsWith('file://') ? decodeURIComponent(new URL(path).pathname) : path;
+    const options: MediaSaveRequest = { path: localPath, displayName: name, mimeType, expectedSize: size };
     if (saveAs && !saver.saveAs) throw new Error('Save as is unavailable in this Android build');
-    const saved = saveAs ? await saver.saveAs!(options) : await saver.saveVideo(options);
+    let saved: Awaited<ReturnType<MediaSaverPlugin['saveVideo'] | MediaSaverPlugin['saveAs']>>;
+    try {
+      saved = saveAs ? await saver.saveAs!(options) : await saver.saveVideo(options);
+    } catch (error) {
+      const native = nativeSaveDiagnostic(error);
+      if (native.apiLevel != null) diagnostic.apiLevel = native.apiLevel;
+      if (saveAs || native.code !== 'MEDIASTORE_INSERT_FAILED' || !saver.saveAs) throw error;
+      diagnostic.mediaStoreFailure = native;
+      diagnostic.fallback = 'ACTION_CREATE_DOCUMENT';
+      diagnostic.method = 'document';
+      logExport('save-fallback', JSON.stringify(diagnostic));
+      window.dispatchEvent(new CustomEvent('clipnova-save-fallback', { detail: { name, reason: String(error) } }));
+      // Give the bilingual status message a paint before the system picker covers it.
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      saved = await saver.saveAs(options);
+    }
     const relativePath = 'relativePath' in saved && typeof saved.relativePath === 'string' ? saved.relativePath : undefined;
     Object.assign(diagnostic, { uri: saved.uri, bytesWritten: saved.size, apiLevel: saved.sdkInt, method: saved.method,
       requestedDisplayName: name, displayName: relativePath?.split('/').pop() || name });
+    if ('diagnostics' in saved) diagnostic.native = saved.diagnostics;
     if (!saved.uri) throw new Error('MediaStore did not return a saved file URI');
     if (saved.size !== size) throw new Error('Save byte count mismatch: expected ' + size + ', wrote ' + saved.size);
     const query = await saver.verifySize({ uri: saved.uri, expectedSize: size });
     diagnostic.query = query;
     if (!query.verified || query.actualSize !== size || query.exists !== true || query.pending !== 0)
       throw new Error('Saved file is not published or size mismatch: ' + JSON.stringify(query));
-    Object.assign(result, { saved: true, verified: true, uri: saved.uri, sdkInt: Number(saved.sdkInt),
+    Object.assign(result, { saved: true, verified: true, uri: saved.uri,
       method: saved.method || result.method, relativePath: relativePath || saved.uri });
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     diagnostic.exception = result.error;
-    const nativeStart = result.error.indexOf('{');
-    if (nativeStart >= 0) { try { diagnostic.native = JSON.parse(result.error.slice(nativeStart)); } catch {} }
-    if (diagnostic.apiLevel == null) diagnostic.apiLevel = Number(result.error.match(/API (\d+)/)?.[1]) || null;
+    const native = nativeSaveDiagnostic(error);
+    if (Object.keys(native).length) diagnostic.native = native;
+    if (native.apiLevel != null) diagnostic.apiLevel = native.apiLevel;
   }
+  const apiLevel = Number(diagnostic.apiLevel);
+  result.sdkInt = Number.isInteger(apiLevel) && apiLevel > 0 ? apiLevel : null;
+  diagnostic.apiLevel = result.sdkInt;
   result.diagnostics = JSON.stringify(diagnostic);
   logExport(result.saved ? 'save-verified' : 'save-error', result.diagnostics);
   return result;

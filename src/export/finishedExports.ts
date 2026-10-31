@@ -5,6 +5,7 @@ import { logExport } from './exportEngine';
 
 export interface FinishedExport {
   id: string; name: string; size: number; mimeType: string; date: string;
+  savedPath?: string; saveMethod?: string; sdkInt?: number | null;
   uri: string; retainedUri?: string; path?: string; status: 'saved' | 'not-saved' | 'failed'; error?: string; diagnostics?: string;
 }
 type OutputDependencies = {
@@ -109,7 +110,8 @@ export async function saveFinishedExport(entry: FinishedExport, saveAs = false):
   const result = await publishExportPath(entry.retainedUri, entry.name, entry.mimeType, entry.size, deps.mediaSaver, saveAs);
   return recordFinishedExport({ ...entry, status: result.saved ? 'saved' : 'failed',
     name: result.saved && result.relativePath?.startsWith('Movies/ClipNova/') ? result.relativePath.split('/').pop()! : entry.name,
-    uri: result.saved ? result.uri! : entry.retainedUri, error: result.error || undefined, diagnostics: result.diagnostics });
+    uri: result.saved ? result.uri! : entry.retainedUri, savedPath: result.relativePath || undefined,
+    saveMethod: result.method, sdkInt: result.sdkInt, error: result.error || undefined, diagnostics: result.diagnostics });
 }
 export async function discardFinishedExport(entry: FinishedExport) {
   if (entry.path) {

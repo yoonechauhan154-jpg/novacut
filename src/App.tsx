@@ -369,6 +369,12 @@ export function App() {
     error: string | null;
   }
   const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null);
+  const [saveFallback, setSaveFallback] = useState(false);
+  useEffect(() => {
+    const onFallback = () => { setSaveFallback(true); setExportLog(getExportLog()); };
+    window.addEventListener('clipnova-save-fallback', onFallback);
+    return () => window.removeEventListener('clipnova-save-fallback', onFallback);
+  }, []);
   const [finishedEntry, setFinishedEntry] = useState<FinishedExport | null>(null);
   const [finishedExports, setFinishedExports] = useState<FinishedExport[]>(listFinishedExports);
   useEffect(() => {
@@ -2366,6 +2372,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     logExport('save-error', message); setExportLog(getExportLog());
   };
   const handleSaveEntry = async (entry: FinishedExport, saveAs = false) => {
+    setSaveFallback(false);
     setSaveOutcome({ kind: 'saving', name: entry.name, size: entry.size, uri: entry.uri,
       relativePath: null, method: saveAs ? 'document' : 'mediastore', sdkInt: null, verified: false, error: null });
     try {
@@ -2373,8 +2380,8 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
       setFinishedEntry(saved);
       setSaveOutcome({ kind: saved.status === 'failed' ? 'error' : saved.status === 'saved' ? 'done' : 'done',
         name: saved.name, size: saved.size, uri: saved.uri,
-        relativePath: saved.status === 'saved' && !saveAs ? 'Movies/ClipNova/' + saved.name : saved.uri,
-        method: saveAs ? 'document' : automaticGallerySave() ? 'mediastore' : 'download', sdkInt: null,
+        relativePath: saved.savedPath || saved.uri,
+        method: saved.saveMethod || (saveAs ? 'document' : 'download'), sdkInt: saved.sdkInt ?? null,
         verified: saved.status === 'saved', error: saved.error || null });
       setExportLog(getExportLog());
       return saved;
@@ -5668,6 +5675,9 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
               : (lang === 'hi' ? 'डाउनलोड शुरू; ऐप की कॉपी सुरक्षित है' : 'Download started; app copy retained')}</strong>
             <p className="text-sm break-all">{saveOutcome.kind === 'done' && saveOutcome.verified
               ? (lang === 'hi' ? 'सेव किया गया: ' : 'Saved to ') + saveOutcome.relativePath : saveOutcome.name} ({formatFileSize(saveOutcome.size)})</p>
+            {saveFallback && <p role="status" className="text-sm text-amber-300">{lang === 'hi'
+              ? 'गैलरी में सेव शुरू नहीं हो सका। सेव करने के लिए सिस्टम का फ़ोल्डर चुनने वाला विकल्प खोला गया है।'
+              : 'Gallery save could not start. The system Save as picker was opened so you can choose a folder.'}</p>}
             {saveOutcome.error && <pre className="text-xs text-rose-300 whitespace-pre-wrap break-all max-h-32 overflow-auto">{saveOutcome.error}</pre>}
             {finishedEntry?.diagnostics && <details><summary>{lang === 'hi' ? 'सेव विवरण' : 'Save diagnostics'}</summary>
               <pre className="text-[10px] max-h-40 overflow-auto whitespace-pre-wrap break-all">{finishedEntry.diagnostics}</pre></details>}

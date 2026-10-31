@@ -30,6 +30,7 @@ public class MediaSaverPlugin extends Plugin {
   private final java.util.concurrent.ExecutorService documentWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
   /** Direct bridge streaming is reserved for failure to retain a Blob (e.g. full app storage). */
   @PluginMethod public void beginDocument(PluginCall call) {
+    try { requiredSize(call); } catch (Exception e) { call.reject(e.getMessage(), e); return; }
     Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
     intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(call.getString("mimeType", "video/mp4"));
@@ -48,7 +49,7 @@ public class MediaSaverPlugin extends Plugin {
         OutputStream stream = getContext().getContentResolver().openOutputStream(uri, "w");
         if (stream == null) throw new IOException("Document stream unavailable");
         String id = java.util.UUID.randomUUID().toString();
-        documents.put(id, new DocumentWrite(uri, stream, call.getLong("expectedSize", 0L)));
+        documents.put(id, new DocumentWrite(uri, stream, requiredSize(call)));
         JSObject ret = new JSObject(); ret.put("id", id); ret.put("uri", uri.toString()); ret.put("sdkInt", Build.VERSION.SDK_INT); call.resolve(ret);
       } catch (Exception e) { call.reject("Save as could not open document: " + e, e); }
     });
@@ -90,16 +91,43 @@ public class MediaSaverPlugin extends Plugin {
     });
   }
 
+  /** JSON integers may be Integer, Long or Double: PluginCall.getLong only accepts Long. */
+  static long optionalSize(PluginCall call) throws IOException {
+    Object raw = call.getData().opt("expectedSize");
+    if (raw == null || raw == org.json.JSONObject.NULL) return 0;
+    if (!(raw instanceof Number)) throw new IOException("expectedSize must be a JSON number of bytes");
+    double value = ((Number) raw).doubleValue();
+    if (!Double.isFinite(value) || value < 0 || value > 9007199254740991d || value != Math.rint(value))
+      throw new IOException("expectedSize must be a non-negative safe integer of bytes");
+    return ((Number) raw).longValue();
+  }
+  private static long requiredSize(PluginCall call) throws IOException {
+    long size = optionalSize(call);
+    if (size == 0) throw new IOException("expectedSize must be positive for streaming or verification");
+    return size;
+  }
+  @PluginMethod public void getInfo(PluginCall call) {
+    JSObject info = new JSObject(); info.put("sdkInt", Build.VERSION.SDK_INT); call.resolve(info);
+  }
+
   private File exportFile(PluginCall call) throws Exception {
     String path = call.getString("path");
     if (path == null) throw new IOException("Finished export path required");
-    File src = new File(Uri.parse(path).getScheme() == null ? path : Uri.parse(path).getPath()).getCanonicalFile();
+    Uri uri = Uri.parse(path);
+    if (uri.getScheme() != null && (!"file".equals(uri.getScheme()) || (uri.getAuthority() != null && !uri.getAuthority().isEmpty())))
+      throw new IOException("Finished export must be a local file URI or absolute path");
+    String localPath = uri.getScheme() == null ? path : uri.getPath(); // Uri.getPath decodes once, including spaces.
+    if (localPath == null || !new File(localPath).isAbsolute()) throw new IOException("Absolute finished export path required");
+    File src = new File(localPath).getCanonicalFile();
     String cache = new File(getContext().getCacheDir(), "clipnova-exports").getCanonicalPath() + "/";
     String durable = new File(getContext().getFilesDir(), "clipnova-outputs").getCanonicalPath() + "/";
     if ((!src.getPath().startsWith(cache) && !src.getPath().startsWith(durable)) || !src.isFile())
       throw new IOException("MediaSaver accepts only finished export files");
-    long expected = call.getLong("expectedSize", 0L);
-    if (expected <= 0 || src.length() != expected) throw new IOException("Input size mismatch: " + src.length() + "/" + expected);
+    long actual = src.length(), expected = optionalSize(call);
+    if (actual <= 0) throw new IOException("Finished export file is empty");
+    // The closed retained file is authoritative. Missing/zero JS hints do not invalidate it.
+    if (expected > 0 && actual != expected)
+      throw new IOException("Input size mismatch: actual=" + actual + " bytes, expected=" + expected + " bytes");
     return src;
   }
 
@@ -108,9 +136,13 @@ public class MediaSaverPlugin extends Plugin {
       JSObject diagnostic = new JSObject();
       diagnostic.put("method", "mediastore"); diagnostic.put("apiLevel", Build.VERSION.SDK_INT);
       diagnostic.put("requestedDisplayName", call.getString("displayName")); diagnostic.put("bytesWritten", 0);
-      diagnostic.put("expectedSize", call.getLong("expectedSize", 0L));
+      Object rawSize = call.getData().opt("expectedSize");
+      diagnostic.put("expectedSize", rawSize == null ? org.json.JSONObject.NULL : rawSize);
+      diagnostic.put("expectedSizeType", rawSize == null ? "missing" : rawSize.getClass().getSimpleName());
       try {
         File src = exportFile(call);
+        long inputSize = src.length();
+        diagnostic.put("inputSize", inputSize); diagnostic.put("path", src.getAbsolutePath());
         String name = ExportNames.unique(call.getString("displayName", "ClipNova.mp4"));
         diagnostic.put("displayName", name);
         String mime = call.getString("mimeType", "video/mp4");
@@ -121,9 +153,15 @@ public class MediaSaverPlugin extends Plugin {
         values.put(MediaStore.Video.Media.MIME_TYPE, mime);
         values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ClipNova");
         values.put(MediaStore.Video.Media.IS_PENDING, 1);
-        Uri uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
-        diagnostic.put("uri", uri == null ? org.json.JSONObject.NULL : uri.toString());
-        if (uri == null) throw new IOException("MediaStore insert returned null URI");
+        Uri uri;
+        try {
+          uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+          diagnostic.put("uri", uri == null ? org.json.JSONObject.NULL : uri.toString());
+          if (uri == null) throw new IOException("MediaStore insert returned null URI");
+        } catch (Exception insertError) {
+          diagnostic.put("code", "MEDIASTORE_INSERT_FAILED");
+          throw insertError; // JS opens ACTION_CREATE_DOCUMENT and retains this exact source.
+        }
         boolean published = false;
         try {
           long written;
@@ -131,16 +169,16 @@ public class MediaSaverPlugin extends Plugin {
             if (out == null) throw new IOException("MediaStore output stream is null: " + uri);
             written = copyFile(src, out, diagnostic);
           }
-          if (written != src.length()) throw new IOException("MediaStore copy size mismatch: " + written + "/" + src.length());
+          if (written != inputSize || src.length() != inputSize) throw new IOException("MediaStore copy size mismatch: written=" + written + ", input=" + inputSize + ", currentInput=" + src.length());
           ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0);
           if (resolver.update(uri, done, null, null) != 1) throw new IOException("MediaStore publish update failed: " + uri);
-          JSObject query = inspect(uri, src.length());
+          JSObject query = inspect(uri, inputSize);
           diagnostic.put("query", query);
           if (!query.getBoolean("verified", false)) throw new IOException("MediaStore verification failed: " + query);
           published = true;
           JSObject result = result(uri, written, "mediastore");
           result.put("relativePath", "Movies/ClipNova/" + query.getString("displayName", name));
-          result.put("query", query); call.resolve(result);
+          result.put("query", query); result.put("diagnostics", diagnostic); call.resolve(result);
         } finally {
           // Only the new output row belongs to this operation. Never delete src.
           if (!published) resolver.delete(uri, null, null);
@@ -233,7 +271,7 @@ public class MediaSaverPlugin extends Plugin {
   }
   @PluginMethod public void verifySize(PluginCall call) {
     new Thread(() -> {
-      try { call.resolve(inspect(Uri.parse(call.getString("uri", "")), call.getLong("expectedSize", 0L))); }
+      try { call.resolve(inspect(Uri.parse(call.getString("uri", "")), requiredSize(call))); }
       catch (Exception e) { call.reject("Saved file query failed: " + e, e); }
     }, "ClipNova-verify-save").start();
   }
