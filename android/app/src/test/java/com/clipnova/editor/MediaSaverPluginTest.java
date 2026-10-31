@@ -66,7 +66,7 @@ public class MediaSaverPluginTest {
     Call call = new Call("saveVideo", payload); plugin.saveVideo(call); call.await();
     assertNull(call.error, call.error); assertNotNull(call.value);
     assertEquals(source.length(), call.value.getLong("size"));
-    assertEquals(Build.VERSION.SDK_INT, call.value.getInt("sdkInt").intValue());
+    assertEquals(Build.VERSION.SDK_INT, call.value.getInt("sdkInt"));
     Uri uri = Uri.parse(call.value.getString("uri")); FakeMediaProvider.Row row = provider.rows.get(uri);
     assertNotNull(row); assertEquals(0, row.pending);
     assertEquals("Movies/ClipNova", row.relativePath);
