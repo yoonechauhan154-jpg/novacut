@@ -47,10 +47,11 @@ const base64 = (blob: Blob) => new Promise<string>((resolve, reject) => {
   reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.readAsDataURL(blob);
 });
 /** Only finished outputs live here; imported sources are never accepted or cleaned. */
-export async function retainFinishedExport(blob: Blob, title: string): Promise<FinishedExport> {
+export async function retainFinishedExport(blob: Blob, title: string, existing?: FinishedExport): Promise<FinishedExport> {
   const ext = blob.type.includes('mp4') ? '.mp4' : '.webm';
   let entry: FinishedExport = { id: crypto.randomUUID(), name: uniqueExportName(title + ext), size: blob.size,
     mimeType: blob.type || 'video/mp4', date: new Date().toISOString(), uri: '', status: 'not-saved' };
+  if (existing) entry = { ...existing, size: blob.size, status: 'not-saved', error: undefined };
   recordFinishedExport(entry);
   const deps = dependencies();
   try {
@@ -74,7 +75,7 @@ export async function retainFinishedExport(blob: Blob, title: string): Promise<F
     return recordFinishedExport(entry);
   } catch (error) {
     entry = { ...entry, status: 'failed', error: 'Could not retain finished output: ' + String(error) };
-    recordFinishedExport(entry); logExport('save-error', JSON.stringify(entry)); throw new Error(entry.error);
+    recordFinishedExport(entry); logExport('save-error', JSON.stringify(entry)); throw Object.assign(new Error(entry.error), { entry });
   }
 }
 export async function retainNativeExport(result: { uri: string; name: string; size: number }) {
@@ -118,4 +119,33 @@ export async function getFinishedExportBlob(entry: FinishedExport) {
   const response = await fetch(Capacitor.convertFileSrc(entry.retainedUri));
   if (!response.ok) throw new Error('Retained export cannot be read');
   return response.blob();
+}
+
+/** ACTION_CREATE_DOCUMENT can still save to another volume when app storage is full. */
+export async function saveUnretainedBlobAs(blob: Blob, title: string, existing?: FinishedExport) {
+  const saver = dependencies().mediaSaver;
+  if (!saver?.beginDocument) throw new Error('Direct Save as requires the updated Android app');
+  const entry: FinishedExport = existing || { id: crypto.randomUUID(), name: uniqueExportName(title + (blob.type.includes('mp4') ? '.mp4' : '.webm')),
+    size: blob.size, mimeType: blob.type, date: new Date().toISOString(), uri: '', status: 'not-saved' };
+  let session: Awaited<ReturnType<MediaSaverPlugin['beginDocument']>> | undefined;
+  const diagnostic: Record<string, unknown> = { method: 'document-stream', displayName: entry.name, expectedSize: blob.size, bytesWritten: 0 };
+  try {
+    session = await saver.beginDocument({ displayName: entry.name, mimeType: entry.mimeType, expectedSize: blob.size });
+    Object.assign(diagnostic, { uri: session.uri, apiLevel: session.sdkInt });
+    for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
+      const chunk = await base64(blob.slice(offset, offset + 1024 * 1024));
+      const progress = await saver.writeDocumentChunk({ id: session.id, data: chunk }); diagnostic.bytesWritten = progress.written;
+    }
+    const result = await saver.finishDocument({ id: session.id });
+    const query = await saver.verifySize({ uri: result.uri, expectedSize: blob.size }); diagnostic.query = query;
+    if (!result.uri || result.size !== blob.size || !query.verified || query.actualSize !== blob.size || query.exists !== true || query.pending !== 0)
+      throw new Error('Document verification failed: ' + JSON.stringify(query));
+    logExport('save-verified', JSON.stringify(diagnostic));
+    return recordFinishedExport({ ...entry, status: 'saved', uri: result.uri, retainedUri: result.uri, error: undefined, diagnostics: JSON.stringify(diagnostic) });
+  } catch (error) {
+    if (session) await saver.abortDocument({ id: session.id }).catch(() => {});
+    diagnostic.exception = String(error); logExport('save-error', JSON.stringify(diagnostic));
+    recordFinishedExport({ ...entry, status: 'failed', error: String(error), diagnostics: JSON.stringify(diagnostic) });
+    throw error;
+  }
 }

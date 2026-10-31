@@ -1,6 +1,6 @@
 import { reversePreviewAudio } from './utils/reversePreviewAudio';
-import { retainFinishedExport, retainNativeExport, saveFinishedExport, listFinishedExports, discardFinishedExport, automaticGallerySave, getFinishedExportBlob, type FinishedExport } from './export/finishedExports';
-import { changeClipSpeed, clipSourceTime, configurePreviewRate, splitClip } from './utils/clipTiming';
+import { retainFinishedExport, saveUnretainedBlobAs, retainNativeExport, saveFinishedExport, listFinishedExports, discardFinishedExport, automaticGallerySave, getFinishedExportBlob, type FinishedExport } from './export/finishedExports';
+import { changeClipSpeed, clipSourceTime, configurePreviewRate, splitClip, normalizeClipSpeeds } from './utils/clipTiming';
 import { resolveProjectSources, relinkProjectSource, MissingSourceError, type MissingSource } from './utils/projectSources';
 import { createOwnedMediaUrl, revokeOwnedMediaUrl, getMediaAudit } from './utils/mediaOwnership';
 import { getMediaSaverPlugin } from './utils/androidBridge';
@@ -1211,7 +1211,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     setSourcesOpening(true); setIsPlaying(false); soundEngine.stopAllAudio();
     reversePreviewAudio.stop();
     try {
-      const lease = await resolveProjectSources(proj, 'open', logExport);
+      const lease = await resolveProjectSources(normalizeClipSpeeds(proj), 'open', logExport);
       if (generation !== sourceOpenGeneration.current) { lease.release(); return; }
       clearPreviewMedia();
       openSourceLeaseRef.current?.release();
@@ -2214,6 +2214,9 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   const handleStartVideoExport = async (mode: 'auto' | 'native' = 'auto') => {
     if (exportBusyRef.current || labRunning || sourcesOpening) return;
+    if (exportedVideoBlob && !finishedEntry?.retainedUri) {
+      showRetentionError(project.name, exportedVideoBlob.size, 'Save or explicitly discard the previous finished output before rendering again.'); return;
+    }
     exportBusyRef.current = true;
     setIsPlaying(false);
     soundEngine.stopAllAudio();
@@ -2357,6 +2360,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
 
   const showRetentionError = (name: string, size: number, error: unknown) => {
     const message = String(error);
+    if (error && typeof error === 'object' && 'entry' in error) setFinishedEntry(error.entry as FinishedExport);
     setSaveOutcome({ kind: 'error', name, size, uri: null, relativePath: null, method: 'app-storage',
       sdkInt: null, verified: false, error: message });
     logExport('save-error', message); setExportLog(getExportLog());
@@ -2381,7 +2385,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
     let entry = finishedEntry;
     try {
       if (!entry?.retainedUri && exportedVideoBlob) {
-        entry = await retainFinishedExport(exportedVideoBlob, project.name + '_' + project.resolution); setFinishedEntry(entry);
+        entry = await retainFinishedExport(exportedVideoBlob, project.name + '_' + project.resolution, entry || undefined); setFinishedEntry(entry);
       }
       if (!entry) throw new Error('Finished output unavailable');
       if (entry.status === 'saved') await handleOpenSavedUri(entry.uri, entry.mimeType);
@@ -2390,7 +2394,11 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
   };
   const handleSaveAs = async (entry = finishedEntry) => {
     try {
-      if (!entry?.retainedUri && exportedVideoBlob) entry = await retainFinishedExport(exportedVideoBlob, project.name);
+      if (!entry?.retainedUri && exportedVideoBlob) {
+        const saved = await saveUnretainedBlobAs(exportedVideoBlob, project.name, entry || undefined); setFinishedEntry(saved);
+        setSaveOutcome({ kind: 'done', name: saved.name, size: saved.size, uri: saved.uri, relativePath: saved.uri,
+          method: 'document-stream', sdkInt: null, verified: true, error: null }); setExportLog(getExportLog()); return;
+      }
       if (!entry) throw new Error('Finished output unavailable');
       await handleSaveEntry(entry, true);
     } catch (error) { showRetentionError(project.name, exportedVideoBlob?.size || 0, error); }
@@ -5655,7 +5663,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         <div className="fixed inset-0 z-[70] bg-black/80 flex items-center justify-center p-4" role="dialog" aria-label={lang === 'hi' ? 'सेव की स्थिति' : 'Save status'}>
           <div data-testid="save-status" className="w-full max-w-md rounded-2xl border border-slate-600 bg-slate-950 p-5 space-y-3">
             <strong>{saveOutcome.kind === 'saving' ? (lang === 'hi' ? 'वीडियो सेव हो रहा है…' : 'Saving video…')
-              : saveOutcome.kind === 'error' ? (lang === 'hi' ? 'सेव विफल — तैयार वीडियो रखा गया है' : 'Save failed — finished output retained')
+              : saveOutcome.kind === 'error' ? (finishedEntry?.retainedUri ? (lang === 'hi' ? 'सेव विफल — तैयार वीडियो रखा गया है' : 'Save failed — finished output retained') : (lang === 'hi' ? 'सेव विफल — ऐप खुला रखें' : 'Save failed — keep this app open'))
               : saveOutcome.verified ? (lang === 'hi' ? 'वीडियो सेव किया गया' : 'Video saved')
               : (lang === 'hi' ? 'डाउनलोड शुरू; ऐप की कॉपी सुरक्षित है' : 'Download started; app copy retained')}</strong>
             <p className="text-sm break-all">{saveOutcome.kind === 'done' && saveOutcome.verified
@@ -5670,6 +5678,10 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                 <button className="min-h-[44px] border rounded px-3" onClick={() => void handleSaveToGallery()}>{lang === 'hi' ? 'फिर सेव करें' : 'Retry save'}</button>
                 <button className="min-h-[44px] border rounded px-3" onClick={() => void handleSaveAs()}>{lang === 'hi' ? 'इस रूप में सेव करें…' : 'Save as…'}</button>
               </>}
+              {!finishedEntry?.retainedUri && exportedVideoBlob && <button className="min-h-[44px] border rounded px-3" onClick={() => {
+                if (exportedVideoUrl) revokeOwnedMediaUrl(exportedVideoUrl, 'App.exportResult');
+                setExportedVideoBlob(null); setExportedVideoUrl(null); setFinishedEntry(null); setSaveOutcome(null);
+              }}>{lang === 'hi' ? 'तैयार वीडियो हटाएँ' : 'Discard finished output'}</button>}
               <button className="min-h-[44px] border rounded px-3" onClick={handleCopyExportLog}>{t(lang, 'exportCopyDiagnostics')}</button>
               <button className="min-h-[44px] border rounded px-3" onClick={() => setSaveOutcome(null)}>{lang === 'hi' ? 'बंद करें' : 'Close'}</button>
             </div>}

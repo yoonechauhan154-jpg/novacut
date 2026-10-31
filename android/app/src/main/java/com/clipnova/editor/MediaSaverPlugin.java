@@ -22,6 +22,72 @@ import java.io.*;
 
 @CapacitorPlugin(name = "MediaSaver")
 public class MediaSaverPlugin extends Plugin {
+  private static final class DocumentWrite {
+    final Uri uri; final OutputStream stream; final long expected; long written;
+    DocumentWrite(Uri uri, OutputStream stream, long expected) { this.uri = uri; this.stream = stream; this.expected = expected; }
+  }
+  private final java.util.Map<String, DocumentWrite> documents = new java.util.HashMap<>();
+  private final java.util.concurrent.ExecutorService documentWorker = java.util.concurrent.Executors.newSingleThreadExecutor();
+  /** Direct bridge streaming is reserved for failure to retain a Blob (e.g. full app storage). */
+  @PluginMethod public void beginDocument(PluginCall call) {
+    Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+    intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(call.getString("mimeType", "video/mp4"));
+    intent.putExtra(Intent.EXTRA_TITLE, call.getString("displayName", "ClipNova.mp4"));
+    startActivityForResult(call, intent, "streamDocumentCreated");
+  }
+  @ActivityCallback private void streamDocumentCreated(PluginCall call, ActivityResult result) {
+    if (call == null) return;
+    if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {
+      call.reject("Save as cancelled; keep app open to retry"); return;
+    }
+    Uri uri = result.getData().getData();
+    documentWorker.execute(() -> {
+      try {
+        OutputStream stream = getContext().getContentResolver().openOutputStream(uri, "w");
+        if (stream == null) throw new IOException("Document stream unavailable");
+        String id = java.util.UUID.randomUUID().toString();
+        documents.put(id, new DocumentWrite(uri, stream, call.getLong("expectedSize", 0L)));
+        JSObject ret = new JSObject(); ret.put("id", id); ret.put("uri", uri.toString()); ret.put("sdkInt", Build.VERSION.SDK_INT); call.resolve(ret);
+      } catch (Exception e) { call.reject("Save as could not open document: " + e, e); }
+    });
+  }
+  @PluginMethod public void writeDocumentChunk(PluginCall call) {
+    documentWorker.execute(() -> {
+      try {
+        DocumentWrite doc = documents.get(call.getString("id", ""));
+        if (doc == null) throw new IOException("Document session missing");
+        String data = call.getString("data", "");
+        if (data.length() > 1500000) throw new IOException("Document chunk exceeds 1 MiB limit");
+        byte[] bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT);
+        if (doc.written + bytes.length > doc.expected) throw new IOException("Too many document bytes");
+        doc.stream.write(bytes); doc.written += bytes.length;
+        JSObject ret = new JSObject(); ret.put("written", doc.written); call.resolve(ret);
+      } catch (Exception e) { call.reject("Document write failed: " + e, e); }
+    });
+  }
+  @PluginMethod public void finishDocument(PluginCall call) {
+    documentWorker.execute(() -> {
+      DocumentWrite doc = documents.remove(call.getString("id", ""));
+      try {
+        if (doc == null) throw new IOException("Document session missing");
+        doc.stream.close();
+        JSObject query = inspect(doc.uri, doc.expected);
+        if (doc.written != doc.expected || !query.getBoolean("verified", false)) throw new IOException("Document size verification failed: " + query);
+        JSObject ret = result(doc.uri, doc.written, "document"); ret.put("query", query); call.resolve(ret);
+      } catch (Exception e) { call.reject("Document finish failed: " + e, e); }
+    });
+  }
+  @PluginMethod public void abortDocument(PluginCall call) {
+    documentWorker.execute(() -> {
+      DocumentWrite doc = documents.remove(call.getString("id", ""));
+      if (doc != null) {
+        try { doc.stream.close(); } catch (Exception ignored) {}
+        try { getContext().getContentResolver().delete(doc.uri, null, null); } catch (Exception ignored) {}
+      }
+      call.resolve();
+    });
+  }
+
   private File exportFile(PluginCall call) throws Exception {
     String path = call.getString("path");
     if (path == null) throw new IOException("Finished export path required");

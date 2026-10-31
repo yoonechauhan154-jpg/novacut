@@ -72,14 +72,14 @@ test('speed UI resizes timeline and participates in undo redo', async ({ page })
   await expect.poll(async () => (await clip()).speed).toBe(2); expect((await clip()).duration).toBe(5);
 });
 
-for (const failure of ['mismatch', 'null', 'exception']) test('save rejects ' + failure + ' without reporting success', async ({ page }) => {
+for (const failure of ['mismatch', 'null', 'exception', 'pending']) test('save rejects ' + failure + ' without reporting success', async ({ page }) => {
   await page.goto('/');
   const result = await page.evaluate(async (failure) => {
     const p = '/src/utils/androidBridge.ts'; const { saveToMediaStore } = await import(p);
     const filesystem = { writeFile: async () => ({}), appendFile: async () => ({}), getUri: async () => ({ uri: 'file:///cache/clipnova-exports/mock' }), deleteFile: async () => ({}) };
     const mediaSaver = {
       saveVideo: async () => { if (failure === 'exception') throw new Error('ENOSPC'); return { uri: failure === 'null' ? null : 'content://saved/1', size: 3, sdkInt: 35 }; },
-      verifySize: async () => ({ verified: false, actualSize: 2, exists: true, pending: 0 }),
+      verifySize: async () => ({ verified: failure === 'pending', actualSize: failure === 'pending' ? 3 : 2, exists: true, pending: failure === 'pending' ? 1 : 0 }),
     };
     return await saveToMediaStore(new Blob(['abc']), 'same.mp4', 'video/mp4', { native: true, filesystem, mediaSaver });
   }, failure);
@@ -242,4 +242,63 @@ test('keep pitch worker preserves a tone and reverse audio follows source order'
     expect(Math.abs(value.hz - 440 * (value.keepPitch ? 1 : value.rate))).toBeLessThan(20);
   }
   expect(result.reverse[0]).toBeGreaterThan(.99); expect(result.reverse[1]).toBeLessThan(.001);
+});
+
+test('legacy speed projects and overlapping effect layers adopt source duration', async ({ page }) => {
+  await page.goto('/');
+  const clips = await page.evaluate(async () => {
+    const p = '/src/utils/clipTiming.ts', b = '/src/data/presets.ts';
+    const { normalizeClipSpeeds } = await import(p), { INITIAL_PROJECT, createBaseClip } = await import(b);
+    return normalizeClipSpeeds({ ...INITIAL_PROJECT, clips: [
+      createBaseClip({ id: 'v', title: 'v', trackId: 'main', trackType: 'video', sourceType: 'uploaded-video',
+        startTime: 0, duration: 10, sourceStart: 0, sourceEnd: 10, speed: 2 }),
+      createBaseClip({ id: 'fx', title: 'fx', trackId: 'fx', trackType: 'effect-layer', sourceType: 'effect-layer',
+        startTime: 0, duration: 10, effect: 'light-leak' }),
+    ] }).clips;
+  });
+  expect(clips.map((c: any) => c.duration)).toEqual([5, 5]);
+  expect(clips[0].sourceEnd).toBe(10);
+});
+
+test('full app storage keeps finished Blob and can stream Save as without a cache copy', async ({ page }) => {
+  await openSource(page, 1.2); await mockGallery(page);
+  await page.evaluate(() => {
+    const deps = (window as any).__clipnovaSaveDependencies;
+    deps.filesystem.writeFile = async () => { throw new Error('ENOSPC app storage'); };
+    let bytes = 0, expected = 0;
+    deps.mediaSaver.beginDocument = async (options: any) => { expected = options.expectedSize; return { id: 'stream', uri: 'content://documents/direct', sdkInt: 35 }; };
+    deps.mediaSaver.writeDocumentChunk = async ({ data }: any) => { bytes += atob(data).length; return { written: bytes }; };
+    deps.mediaSaver.finishDocument = async () => { if (bytes !== expected) throw new Error('Missing bytes');
+      return { uri: 'content://documents/direct', size: bytes, method: 'document', sdkInt: 35 }; };
+    deps.mediaSaver.abortDocument = async () => {};
+  });
+  await page.evaluate(async () => { await (window as any).__clipnovaSourceTest.export(); });
+  await expect(page.getByTestId('save-status')).toContainText('keep this app open');
+  await page.evaluate(async () => { await (window as any).__clipnovaSourceTest.export(); });
+  await expect(page.getByTestId('save-status')).toContainText('previous finished output');
+  await page.getByRole('button', { name: 'Save as…', exact: true }).click();
+  await expect(page.getByTestId('save-status')).toContainText('content://documents/direct');
+  const entries = await page.evaluate(() => JSON.parse(localStorage.getItem('clipnova_my_exports') || '[]'));
+  expect(entries).toHaveLength(1); expect(entries[0].status).toBe('saved'); expect(entries[0].diagnostics).toContain('document-stream');
+});
+
+test('WebCodecs high speed advances through decoded source frames', async ({ page }, info) => {
+  test.setTimeout(90000); await openSource(page);
+  const result = await page.evaluate(async () => {
+    const p = '/src/export/webCodecsExport.ts', timing = '/src/utils/clipTiming.ts';
+    const { encodeWebCodecs } = await import(p), { changeClipSpeed } = await import(timing);
+    const project = changeClipSpeed((window as any).__clipnovaSourceTest.project, 'counter', 10);
+    let result: any;
+    await encodeWebCodecs({ project, format: 'mp4', cancelRef: { current: false }, safeMode: true,
+      onProgress: () => {}, onResult: (r: any) => { result = r; }, onError: (e: any) => { throw new Error(e); } }, () => {});
+    const base64 = await new Promise<string>(resolve => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1]); r.readAsDataURL(result.blob); });
+    return { base64, frames: result.frames };
+  });
+  const file = 'test-exports/speed-10-webcodecs.mp4'; writeFileSync(file, Buffer.from(result.base64, 'base64'));
+  const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames', '-show_streams', '-of', 'json', file], { encoding: 'utf8' }));
+  expect(Number(probe.streams[0].duration)).toBeCloseTo(1, 1); expect(Number(probe.streams[0].nb_read_frames)).toBe(30);
+  const hashes = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-an', '-vf', 'scale=64:36', '-f', 'framemd5', '-'], { encoding: 'utf8' })
+    .split('\n').filter(l => l && !l.startsWith('#')).map(l => l.split(',').pop());
+  expect(new Set(hashes).size).toBeGreaterThan(27);
+  await info.attach('ffprobe-10x', { body: JSON.stringify(probe), contentType: 'application/json' });
 });

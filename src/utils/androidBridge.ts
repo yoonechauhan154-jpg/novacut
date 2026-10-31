@@ -22,6 +22,10 @@ interface CapacitorAppPlugin {
 
 /** Custom native plugin (MediaSaverPlugin, registered in MainActivity). */
 export interface MediaSaverPlugin {
+  beginDocument(opts: { displayName: string; mimeType: string; expectedSize: number }): Promise<{ id: string; uri: string; sdkInt: number }>;
+  writeDocumentChunk(opts: { id: string; data: string }): Promise<{ written: number }>;
+  finishDocument(opts: { id: string }): Promise<{ uri: string; size: number; method: string; sdkInt: number }>;
+  abortDocument(opts: { id: string }): Promise<void>;
   saveVideo(opts: {
     path: string;
     displayName: string;
@@ -356,13 +360,14 @@ export async function publishExportPath(path: string, name: string, mimeType: st
     if (saved.size !== size) throw new Error('Save byte count mismatch: expected ' + size + ', wrote ' + saved.size);
     const query = await saver.verifySize({ uri: saved.uri, expectedSize: size });
     diagnostic.query = query;
-    if (!query.verified || query.actualSize !== size || query.exists === false || (query.pending != null && query.pending !== 0))
+    if (!query.verified || query.actualSize !== size || query.exists !== true || query.pending !== 0)
       throw new Error('Saved file is not published or size mismatch: ' + JSON.stringify(query));
     Object.assign(result, { saved: true, verified: true, uri: saved.uri, sdkInt: Number(saved.sdkInt),
       method: saved.method || result.method, relativePath: 'relativePath' in saved ? saved.relativePath : saved.uri });
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     diagnostic.exception = result.error;
+    if (diagnostic.apiLevel == null) diagnostic.apiLevel = Number(result.error.match(/API (\d+)/)?.[1]) || null;
   }
   result.diagnostics = JSON.stringify(diagnostic);
   logExport(result.saved ? 'save-verified' : 'save-error', result.diagnostics);

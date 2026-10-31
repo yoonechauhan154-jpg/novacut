@@ -36,7 +36,7 @@ async function verifyExport(page: Page, id: string, label: string, info: TestInf
             if (files.get(path.replace('/mock/cache/', '')) !== expectedSize) throw new Error('Wrong gallery input');
             return { uri: 'content://gallery/output', size: expectedSize, method: 'mediastore', relativePath: 'Movies/ClipNova/output', sdkInt: 35 };
           },
-          verifySize: async ({ expectedSize }: { expectedSize: number }) => ({ verified: true, actualSize: expectedSize }),
+          verifySize: async ({ expectedSize }: { expectedSize: number }) => ({ verified: true, actualSize: expectedSize, exists: true, pending: 0 }),
         };
         const saved = await saveToMediaStore(result.blob, 'repeat.mp4', result.blob.type, { filesystem, mediaSaver, native: true });
         if (!saved.saved || !saved.verified || deleted.length !== 1 || files.size) throw new Error('Gallery save/cleanup failed: ' + saved.error);
