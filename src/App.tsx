@@ -1,4 +1,4 @@
-import { reversePreviewAudio } from './utils/reversePreviewAudio';
+import { reversePreviewAudio, needsProcessedPreviewAudio } from './utils/reversePreviewAudio';
 import { retainFinishedExport, saveUnretainedBlobAs, retainNativeExport, saveFinishedExport, listFinishedExports, discardFinishedExport, automaticGallerySave, getFinishedExportBlob, type FinishedExport } from './export/finishedExports';
 import { changeClipSpeed, clipSourceTime, configurePreviewRate, splitClip, normalizeClipSpeeds } from './utils/clipTiming';
 import { resolveProjectSources, relinkProjectSource, MissingSourceError, type MissingSource } from './utils/projectSources';
@@ -833,7 +833,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         const sourceTime = clipSourceTime(ctrlClip, ct);
         // Update mute/volume in case user changed them mid-session
         const continuous = configurePreviewRate(audio, ctrlClip);
-        audio.muted = ctrlClip.muted || ctrlClip.reversed;
+        audio.muted = ctrlClip.muted || needsProcessedPreviewAudio(ctrlClip);
         audio.volume = Math.max(0, Math.min(1, (ctrlClip.volume ?? 100) / 100));
         if (isPlaying && isActive && continuous) {
           if (audio.paused) {
@@ -896,7 +896,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
         // source time = sourceStart + (timelineTime - startTime) * speed
         const sourceTime = clipSourceTime(ctrlClip, ct);
         const continuous = configurePreviewRate(el, ctrlClip);
-        el.muted = ctrlClip.muted || ctrlClip.reversed || showPlainVideo;
+        el.muted = ctrlClip.muted || needsProcessedPreviewAudio(ctrlClip) || showPlainVideo;
         el.volume = Math.max(0, Math.min(1, (ctrlClip.volume ?? 100) / 100));
         // Debug metrics for the active video element
         if (isActive && el.videoWidth > 0) {
@@ -1014,7 +1014,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
             // Scrubbing or paused — seek to show the frame at the playhead.
             vid.currentTime = Math.max(0, sourceTime);
           }
-          vid.muted = activeVideo.muted || activeVideo.reversed;
+          vid.muted = activeVideo.muted || needsProcessedPreviewAudio(activeVideo);
           vid.volume = Math.max(0, Math.min(1, (activeVideo.volume ?? 100) / 100));
         } else if (!videoRef.current.paused) {
           try { videoRef.current.pause(); } catch {}
@@ -5553,7 +5553,7 @@ const showPlainVideo = !needsCanvasRendering(playheadTime);
                       className="w-full min-h-[46px] rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2"
                     >
                       <Check className="w-4 h-4" />
-                      <span>{t(lang, nativeExportResult ? 'exportOpenSaved' : 'exportSaveGallery')}</span>
+                      <span>{t(lang, finishedEntry?.status === 'saved' ? 'exportOpenSaved' : 'exportSaveGallery')}</span>
                     </button>
                     <button
                       type="button"

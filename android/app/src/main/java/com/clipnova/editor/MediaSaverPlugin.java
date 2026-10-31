@@ -103,9 +103,14 @@ public class MediaSaverPlugin extends Plugin {
 
   @PluginMethod public void saveVideo(PluginCall call) {
     new Thread(() -> {
+      JSObject diagnostic = new JSObject();
+      diagnostic.put("method", "mediastore"); diagnostic.put("apiLevel", Build.VERSION.SDK_INT);
+      diagnostic.put("requestedDisplayName", call.getString("displayName")); diagnostic.put("bytesWritten", 0);
+      diagnostic.put("expectedSize", call.getLong("expectedSize", 0L));
       try {
         File src = exportFile(call);
         String name = ExportNames.unique(call.getString("displayName", "ClipNova.mp4"));
+        diagnostic.put("displayName", name);
         String mime = call.getString("mimeType", "video/mp4");
         if (Build.VERSION.SDK_INT < 29) { saveLegacy(call, src, name, mime); return; }
         ContentResolver resolver = getContext().getContentResolver();
@@ -115,18 +120,20 @@ public class MediaSaverPlugin extends Plugin {
         values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ClipNova");
         values.put(MediaStore.Video.Media.IS_PENDING, 1);
         Uri uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+        diagnostic.put("uri", uri == null ? org.json.JSONObject.NULL : uri.toString());
         if (uri == null) throw new IOException("MediaStore insert returned null URI");
         boolean published = false;
         try {
           long written;
           try (OutputStream out = resolver.openOutputStream(uri, "w")) {
             if (out == null) throw new IOException("MediaStore output stream is null: " + uri);
-            written = copyFile(src, out);
+            written = copyFile(src, out, diagnostic);
           }
           if (written != src.length()) throw new IOException("MediaStore copy size mismatch: " + written + "/" + src.length());
           ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0);
           if (resolver.update(uri, done, null, null) != 1) throw new IOException("MediaStore publish update failed: " + uri);
           JSObject query = inspect(uri, src.length());
+          diagnostic.put("query", query);
           if (!query.getBoolean("verified", false)) throw new IOException("MediaStore verification failed: " + query);
           published = true;
           JSObject result = result(uri, written, "mediastore");
@@ -136,7 +143,7 @@ public class MediaSaverPlugin extends Plugin {
           // Only the new output row belongs to this operation. Never delete src.
           if (!published) resolver.delete(uri, null, null);
         }
-      } catch (Exception e) { call.reject("Save failed (API " + Build.VERSION.SDK_INT + "): " + e, e); }
+      } catch (Exception e) { diagnostic.put("exception", e.toString()); call.reject("Save failed: " + diagnostic, e); }
     }, "ClipNova-save").start();
   }
 
@@ -270,10 +277,11 @@ public class MediaSaverPlugin extends Plugin {
   }
 
 
-  private static long copyFile(File src, OutputStream out) throws IOException {
+  private static long copyFile(File src, OutputStream out) throws IOException { return copyFile(src, out, null); }
+  private static long copyFile(File src, OutputStream out, JSObject diagnostic) throws IOException {
     long total = 0; byte[] bytes = new byte[64 * 1024];
     try (InputStream in = new FileInputStream(src)) {
-      int n; while ((n = in.read(bytes)) != -1) { out.write(bytes, 0, n); total += n; }
+      int n; while ((n = in.read(bytes)) != -1) { out.write(bytes, 0, n); total += n; if (diagnostic != null) diagnostic.put("bytesWritten", total); }
     }
     out.flush(); return total;
   }

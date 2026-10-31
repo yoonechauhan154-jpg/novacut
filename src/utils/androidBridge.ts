@@ -355,7 +355,8 @@ export async function publishExportPath(path: string, name: string, mimeType: st
     const options = { path: path.replace(/^file:\/\//, ''), displayName: name, mimeType, expectedSize: size };
     if (saveAs && !saver.saveAs) throw new Error('Save as is unavailable in this Android build');
     const saved = saveAs ? await saver.saveAs!(options) : await saver.saveVideo(options);
-    Object.assign(diagnostic, { uri: saved.uri, bytesWritten: saved.size, apiLevel: saved.sdkInt, method: saved.method });
+    Object.assign(diagnostic, { uri: saved.uri, bytesWritten: saved.size, apiLevel: saved.sdkInt, method: saved.method,
+      requestedDisplayName: name, displayName: 'relativePath' in saved ? saved.relativePath?.split('/').pop() || name : name });
     if (!saved.uri) throw new Error('MediaStore did not return a saved file URI');
     if (saved.size !== size) throw new Error('Save byte count mismatch: expected ' + size + ', wrote ' + saved.size);
     const query = await saver.verifySize({ uri: saved.uri, expectedSize: size });
@@ -367,6 +368,8 @@ export async function publishExportPath(path: string, name: string, mimeType: st
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     diagnostic.exception = result.error;
+    const nativeStart = result.error.indexOf('{');
+    if (nativeStart >= 0) { try { diagnostic.native = JSON.parse(result.error.slice(nativeStart)); } catch {} }
     if (diagnostic.apiLevel == null) diagnostic.apiLevel = Number(result.error.match(/API (\d+)/)?.[1]) || null;
   }
   result.diagnostics = JSON.stringify(diagnostic);

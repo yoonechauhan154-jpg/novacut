@@ -54,10 +54,12 @@ export async function retainFinishedExport(blob: Blob, title: string, existing?:
   if (existing) entry = { ...existing, size: blob.size, status: 'not-saved', error: undefined };
   recordFinishedExport(entry);
   const deps = dependencies();
+  let incompletePath: string | undefined;
   try {
     if (!blob.size) throw new Error('Finished export is empty');
     if (deps.native) {
       const path = 'clipnova-outputs/' + entry.name;
+      incompletePath = path;
       for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
         const data = await base64(blob.slice(offset, offset + 1024 * 1024));
         if (offset === 0) await deps.filesystem.writeFile({ path, data, directory: Directory.Data, recursive: true });
@@ -66,7 +68,7 @@ export async function retainFinishedExport(blob: Blob, title: string, existing?:
       const stat = await deps.filesystem.stat({ path, directory: Directory.Data });
       if (stat.size !== blob.size) throw new Error('Retained output size mismatch: ' + stat.size + '/' + blob.size);
       const { uri } = await deps.filesystem.getUri({ path, directory: Directory.Data });
-      entry = { ...entry, path, retainedUri: uri, uri };
+      entry = { ...entry, path, retainedUri: uri, uri }; incompletePath = undefined;
     } else {
       await blobStore(entry.id, blob);
       entry.retainedUri = entry.uri = 'indexeddb:clipnova_finished_outputs/' + entry.id;
@@ -74,6 +76,10 @@ export async function retainFinishedExport(blob: Blob, title: string, existing?:
     logExport('output-retained', JSON.stringify({ name: entry.name, uri: entry.uri, bytes: entry.size }));
     return recordFinishedExport(entry);
   } catch (error) {
+    if (incompletePath) {
+      try { await deps.filesystem.deleteFile({ path: incompletePath, directory: Directory.Data }); }
+      catch (cleanupError) { logExport('save-cleanup-error', incompletePath + ': ' + String(cleanupError)); }
+    }
     entry = { ...entry, status: 'failed', error: 'Could not retain finished output: ' + String(error) };
     recordFinishedExport(entry); logExport('save-error', JSON.stringify(entry)); throw Object.assign(new Error(entry.error), { entry });
   }

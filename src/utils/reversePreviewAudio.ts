@@ -1,7 +1,9 @@
 import type { TimelineClip } from '../types/editor';
 import { stretchClipAudio } from '../export/audioStretch';
 
-/** HTMLMediaElement has no negative playback rate; reversed audio uses the same worker as export. */
+/** Media elements cannot play backwards and may mute audio outside 0.25–4x.
+ * Use the export worker for those cases while the video decoder remains independent. */
+export const needsProcessedPreviewAudio = (clip: TimelineClip) => clip.reversed || clip.speed < .25 || clip.speed > 4;
 class ReversePreviewAudio {
   private context?: AudioContext;
   private voices = new Map<string, { key: string; buffer?: AudioBuffer; node?: AudioBufferSourceNode; gain?: GainNode; started?: number; offset?: number; failed?: boolean }>();
@@ -14,10 +16,10 @@ class ReversePreviewAudio {
     if (!playing) { this.stop(); return; }
     this.desired.clear();
     for (const clip of clips) {
-      if (!clip.reversed || clip.frozen || clip.muted || !clip.mediaUrl || !['audio', 'video', 'overlay'].includes(clip.trackType)
+      if (!needsProcessedPreviewAudio(clip) || clip.frozen || clip.muted || !clip.mediaUrl || !['audio', 'video', 'overlay'].includes(clip.trackType)
         || time < clip.startTime || time >= clip.startTime + clip.duration) continue;
       this.desired.set(clip.id, { clip, time });
-      const key = [clip.mediaUrl, clip.sourceStart, clip.duration, clip.speed, clip.keepPitch].join('|');
+      const key = [clip.mediaUrl, clip.sourceStart, clip.duration, clip.speed, clip.keepPitch, clip.reversed].join('|');
       let voice = this.voices.get(clip.id);
       if (voice?.key !== key) {
         try { voice?.node?.stop(); } catch {} voice?.gain?.disconnect();
@@ -32,7 +34,7 @@ class ReversePreviewAudio {
             if (decoded.length * decoded.numberOfChannels * 4 > 96 * 1024 * 1024) throw new Error('Reverse preview audio is too large');
             const processed = await stretchClipAudio(decoded, clip, context);
             if (this.voices.get(clip.id) === owned) owned.buffer = processed;
-          } catch (e) { owned.failed = true; error('Reverse audio: ' + String(e)); }
+          } catch (e) { owned.failed = true; error('Processed preview audio: ' + String(e)); }
         })();
       }
       if (!voice.buffer || !this.context) continue;
