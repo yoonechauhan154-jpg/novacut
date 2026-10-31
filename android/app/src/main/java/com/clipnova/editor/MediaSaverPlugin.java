@@ -31,6 +31,7 @@ public class MediaSaverPlugin extends Plugin {
   /** Direct bridge streaming is reserved for failure to retain a Blob (e.g. full app storage). */
   @PluginMethod public void beginDocument(PluginCall call) {
     Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
     intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(call.getString("mimeType", "video/mp4"));
     intent.putExtra(Intent.EXTRA_TITLE, call.getString("displayName", "ClipNova.mp4"));
     startActivityForResult(call, intent, "streamDocumentCreated");
@@ -43,6 +44,7 @@ public class MediaSaverPlugin extends Plugin {
     Uri uri = result.getData().getData();
     documentWorker.execute(() -> {
       try {
+        persistDocumentAccess(uri, result.getData());
         OutputStream stream = getContext().getContentResolver().openOutputStream(uri, "w");
         if (stream == null) throw new IOException("Document stream unavailable");
         String id = java.util.UUID.randomUUID().toString();
@@ -170,7 +172,8 @@ public class MediaSaverPlugin extends Plugin {
     try {
       exportFile(call);
       Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-      intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(call.getString("mimeType", "video/mp4"));
+      intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+    intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType(call.getString("mimeType", "video/mp4"));
       intent.putExtra(Intent.EXTRA_TITLE, call.getString("displayName", "ClipNova.mp4"));
       startActivityForResult(call, intent, "documentCreated");
     } catch (Exception e) { call.reject("Save as failed: " + e, e); }
@@ -183,6 +186,7 @@ public class MediaSaverPlugin extends Plugin {
     Uri uri = activityResult.getData().getData();
     new Thread(() -> {
       try {
+        persistDocumentAccess(uri, activityResult.getData());
         File src = exportFile(call); long written;
         try (OutputStream out = getContext().getContentResolver().openOutputStream(uri, "w")) {
           if (out == null) throw new IOException("Document output stream is null");
@@ -193,6 +197,12 @@ public class MediaSaverPlugin extends Plugin {
         JSObject result = result(uri, written, "document"); result.put("query", query); call.resolve(result);
       } catch (Exception e) { call.reject("Save as failed; output retained: " + e, e); }
     }, "ClipNova-save-as").start();
+  }
+  private void persistDocumentAccess(Uri uri, Intent data) throws IOException {
+    int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+    if (flags == 0) flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+    try { getContext().getContentResolver().takePersistableUriPermission(uri, flags); }
+    catch (SecurityException e) { throw new IOException("Cannot retain access to this document after restart; choose another folder", e); }
   }
   private JSObject result(Uri uri, long size, String method) {
     JSObject result = new JSObject(); result.put("uri", uri.toString()); result.put("size", size);
