@@ -123,11 +123,8 @@ public class MediaSaverPlugin extends Plugin {
     String durable = new File(getContext().getFilesDir(), "clipnova-outputs").getCanonicalPath() + "/";
     if ((!src.getPath().startsWith(cache) && !src.getPath().startsWith(durable)) || !src.isFile())
       throw new IOException("MediaSaver accepts only finished export files");
-    long actual = src.length(), expected = optionalSize(call);
-    if (actual <= 0) throw new IOException("Finished export file is empty");
-    // The closed retained file is authoritative. Missing/zero JS hints do not invalidate it.
-    if (expected > 0 && actual != expected)
-      throw new IOException("Input size mismatch: actual=" + actual + " bytes, expected=" + expected + " bytes");
+    long expected = optionalSize(call);
+    long actual = ExportSaveVerifier.validateInput(src, expected);
     return src;
   }
 
@@ -169,7 +166,7 @@ public class MediaSaverPlugin extends Plugin {
             if (out == null) throw new IOException("MediaStore output stream is null: " + uri);
             written = copyFile(src, out, diagnostic);
           }
-          if (written != inputSize || src.length() != inputSize) throw new IOException("MediaStore copy size mismatch: written=" + written + ", input=" + inputSize + ", currentInput=" + src.length());
+          ExportSaveVerifier.verifyWritten(written, inputSize, src);
           ContentValues done = new ContentValues(); done.put(MediaStore.Video.Media.IS_PENDING, 0);
           if (resolver.update(uri, done, null, null) != 1) throw new IOException("MediaStore publish update failed: " + uri);
           JSObject query = inspect(uri, inputSize);
