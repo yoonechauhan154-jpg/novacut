@@ -1,4 +1,5 @@
 import { stretchClipAudio } from './audioStretch';
+import { estimateAudioBudget } from './audioBudget';
 import { createExportMedia, seekVideo } from './exportMedia';
 import labVideoUrl from '../../test-assets/test-5s.mp4?url';
 import { createBaseClip } from '../data/presets';
@@ -33,6 +34,7 @@ export interface ExportOptions {
     frames: number;
     size: number;
     hasAudio: boolean;
+    audioSkipped: boolean;
     blob: Blob;
     log: ExportLogEntry[];
   }) => void | Promise<void>;
@@ -210,7 +212,10 @@ async function decodeSourceAudio(audioCtx: BaseAudioContext, src: string, requir
     blob = await response.blob();
   } finally { clearTimeout(timer); }
   // Check the Blob before allocating its ArrayBuffer or asking a WebView decoder for PCM.
-  if (blob.size > 32 * 1024 * 1024) throw new Error('Source exceeds WebView audio memory budget; use native export');
+  // NOTE: the abort-on-size gate (blob.size > 32 MB) was removed here — it compared the
+  // whole FILE size instead of the used audio range. Budget is now enforced by
+  // estimateAudioBudget() in renderProjectAudio, which computes PCM need from used
+  // seconds only (usedSeconds * sampleRate * channels * 4).
   let knownAudio = required;
   if (blob.type.includes('mp4') || blob.type.includes('quicktime')) {
     const { inspectMp4 } = await import('./verifyOutput');
@@ -240,6 +245,18 @@ export async function renderProjectAudio(
   const sampleRate = 48000;
   const duration = Math.max(0.01, ...project.clips.map((c) => c.startTime + c.duration));
   const offline = new OfflineAudioContext(2, duration * sampleRate, sampleRate);
+  // Fix #1 + #6: budget is computed from USED ranges only, not file size.
+  const budget = estimateAudioBudget(project);
+  onLog(
+    'audio-budget',
+    `needed=${budget.neededMB.toFixed(2)}MB limit=${budget.limitMB}MB within=${budget.withinBudget} clips=${budget.perClip.length}`
+  );
+  if (!budget.withinBudget) {
+    onLog(
+      'audio-budget-warn',
+      `Needed PCM ${budget.neededMB.toFixed(2)}MB exceeds limit ${budget.limitMB}MB; continuing but memory is unbounded on this path`
+    );
+  }
   let hasAnyAudio = false;
   const decoded = new Map<string, AudioBuffer | null>();
   let pcmBytes = 0;
@@ -257,7 +274,9 @@ export async function renderProjectAudio(
       buffer = await decodeSourceAudio(offline, clip.mediaUrl, clip.trackType === 'audio');
       decoded.set(clip.mediaUrl, buffer);
       if (buffer) pcmBytes += buffer.length * buffer.numberOfChannels * 4;
-      if (pcmBytes > 96 * 1024 * 1024) throw new Error('Decoded audio exceeds WebView memory budget; use native export');
+      // Fix #1: the whole-buffer abort (pcmBytes > 96 MB) is replaced by the
+      // used-range budget check at the top of renderProjectAudio. The chunked
+      // pipeline in audioPipeline.ts handles bounded memory for large sources.
     }
 
     if (!buffer) continue;

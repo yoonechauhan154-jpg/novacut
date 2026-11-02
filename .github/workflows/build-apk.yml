@@ -99,6 +99,9 @@ jobs:
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
+      - name: Run Unit Tests (vitest)
+        run: npm run test:unit
+
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chromium
 
@@ -109,6 +112,7 @@ jobs:
         run: |
           ffmpeg -y -f lavfi -i testsrc2=duration=10:size=720x1280:rate=30 -f lavfi -i sine=frequency=440:duration=10 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-12s.webm
           ffmpeg -y -f lavfi -i testsrc2=duration=8:size=720x1280:rate=30 -f lavfi -i sine=frequency=523:duration=8 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-8s.webm
+          ffmpeg -y -f lavfi -i testsrc2=duration=60:size=1920x1080:rate=30 -f lavfi -i sine=frequency=440:duration=60 -c:v libx264 -b:v 8M -c:a aac -b:a 128k -shortest test-assets/big-60s-1080p.mp4
 
       - name: Create test-exports directory
         run: mkdir -p test-exports

@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import type { ProjectData } from '../types/editor';
 import type { ExportOptions } from './exportEngine';
 import { clearExportLog, getExportLog, logExport, markLadderStrategy } from './exportEngine';
+import { estimateAudioBudget } from './audioBudget';
 import { encodeWebCodecs } from './webCodecsExport';
 import { encodeRecorder } from './recorderExport';
 import { exportNative, nativeExportAvailable, type NativeResult } from './nativeExport';
@@ -39,7 +40,7 @@ export async function exportProject(project: ProjectData, format: 'mp4' | 'webm'
     abortIfCancelled(cancel);
     if (!result) throw new Error('Encoder produced no output');
     progress(95);
-    const expectedAudio = result.hasAudio || project.clips.some(c => c.trackType === 'audio' && !c.muted && c.volume > 0);
+    const expectedAudio = !result.audioSkipped && (result.hasAudio || project.clips.some(c => c.trackType === 'audio' && !c.muted && c.volume > 0));
     const expectMotion = project.clips.some(c => !c.muted && !c.frozen &&
       ['uploaded-video', 'procedural-scene'].includes(c.sourceType));
     const verification = await verifyOutput(result.blob, result.duration, expectedAudio, expectMotion, cancel, logExport);

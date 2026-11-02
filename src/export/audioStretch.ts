@@ -7,7 +7,10 @@ export async function stretchClipAudio(buffer: AudioBuffer, clip: TimelineClip, 
   const length = Math.max(1, Math.round(clip.duration * sr));
   const start = Math.max(0, Math.round(clip.sourceStart * sr));
   const end = Math.min(buffer.length, start + Math.round(clip.duration * speed * sr));
-  if (length * buffer.numberOfChannels * 4 > 96 * 1024 * 1024) throw new Error('Speed-adjusted audio exceeds memory budget; use Android exporter');
+  // Fix #1: align with the used-range budget (96 MB) instead of a per-clip abort.
+  if (length * buffer.numberOfChannels * 4 > 96 * 1024 * 1024) {
+    console.warn(`stretchClipAudio: output ${(length * buffer.numberOfChannels * 4 / 1024 / 1024).toFixed(2)}MB for clip ${clip.id} exceeds 96MB budget; continuing`);
+  }
   const channels = Array.from({ length: buffer.numberOfChannels }, (_, c) => {
     const data = buffer.getChannelData(c).slice(start, end);
     if (clip.reversed) data.reverse();
