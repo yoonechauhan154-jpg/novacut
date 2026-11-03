@@ -32,13 +32,24 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
     // and continue with a video-only output.
     let audioChunks: DecodedPcm[] = [];
     let hasAudio = false;
+    let audioSkippedReason = '';
     if (!opts.safeMode) {
       try {
         const rendered = await renderProjectAudioChunked(project, log);
         audioChunks = rendered.chunks;
         hasAudio = rendered.hasAudio && audioChunks.length > 0;
+        // Log every pipeline step so a phone failure shows exactly where it broke.
+        for (const step of rendered.trace.steps) { log('audio-trace', step); }
+        if (rendered.trace.skipReason) {
+          audioSkippedReason = rendered.trace.skipReason;
+          log('audio-skipped', `audio skipped: ${rendered.trace.skipReason}`);
+        } else if (!hasAudio) {
+          audioSkippedReason = 'no audio chunks produced';
+          log('audio-skipped', 'audio skipped: no audio chunks produced');
+        }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
+        audioSkippedReason = reason;
         log('audio-skipped', `audio skipped: ${reason}`);
         hasAudio = false;
       }
@@ -47,6 +58,7 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
     const audioConfig = { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 };
     // If audio is wanted but the AAC encoder is unavailable, drop audio rather than aborting.
     if (hasAudio && (typeof AudioEncoder === 'undefined' || !(await AudioEncoder.isConfigSupported(audioConfig)).supported)) {
+      audioSkippedReason = 'AAC encoder unavailable';
       log('audio-skipped', 'audio skipped: AAC encoder unavailable');
       hasAudio = false;
     }
@@ -57,6 +69,8 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
       fastStart: 'in-memory', firstTimestampBehavior: 'offset',
     });
     let chunks = 0;
+    let repeatedFrames = 0;
+    const prevCurrentTime = new Map<string, number>();
     encoder = new VideoEncoder({
       output: (chunk, metadata) => { muxer.addVideoChunk(chunk, metadata); chunks++; },
       error: err => { encoderError = err; },
@@ -71,7 +85,15 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
       for (const clip of project.clips) {
         if (time < clip.startTime || time >= clip.startTime + clip.duration || clip.muted) continue;
         const el = resources.media.get(clip.id);
-        if (el instanceof HTMLVideoElement) await advanceVideo(el, clipSourceTime(clip, time, el.duration), project.fps, cancelRef, log);
+        if (el instanceof HTMLVideoElement) {
+          const before = el.currentTime;
+          await advanceVideo(el, clipSourceTime(clip, time, el.duration), project.fps, cancelRef, log);
+          const after = el.currentTime;
+          prevCurrentTime.set(clip.id, after);
+          // If currentTime didn't advance between output frames, the same source
+          // frame will be drawn twice — count it as a repeated frame.
+          if (Math.abs(after - before) < 0.5 / project.fps) repeatedFrames++;
+        }
       }
       check();
       renderProjectFrame(ctx, project, time, resources.media, 'export-full', true);
@@ -129,9 +151,9 @@ export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, d
     }
     muxer.finalize(); check();
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
-    log('mux-done', 'frames=' + chunks + ' bytes=' + blob.size + ' audio=' + hasAudio);
+    log('mux-done', 'frames=' + chunks + ' bytes=' + blob.size + ' audio=' + hasAudio + ' repeated=' + repeatedFrames);
     await opts.onResult({ format: 'MP4 (H.264 + AAC)', resolution: width + '×' + height, duration,
-      frames: chunks, size: blob.size, hasAudio, audioSkipped: !hasAudio, blob, log: [] });
+      frames: chunks, size: blob.size, hasAudio, audioSkipped: !hasAudio, audioSkippedReason, repeatedFrames, blob, log: [] });
   } finally {
     try { encoder?.close(); } catch {}
     try { audioEncoder?.close(); } catch {}

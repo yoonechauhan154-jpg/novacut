@@ -13,7 +13,8 @@ import { trace } from '../utils/crashTrace';
 
 export interface VerifiedExport {
   blob?: Blob; native?: NativeResult; format: string; resolution: string;
-  size: number; duration: number; frames: number; hasAudio: boolean; verification: FileVerification;
+  size: number; duration: number; frames: number; hasAudio: boolean;
+  audioSkippedReason?: string; repeatedFrames?: number; verification: FileVerification;
 }
 
 export async function exportProject(project: ProjectData, format: 'mp4' | 'webm', cancel: CancelFlag,
@@ -47,7 +48,8 @@ export async function exportProject(project: ProjectData, format: 'mp4' | 'webm'
     abortIfCancelled(cancel);
     if (!verification.ok) throw new Error(verification.error || 'Output verification failed');
     return { ...result, frames: verification.frames || result.frames, duration: verification.duration,
-      hasAudio: verification.hasAudio, verification };
+      hasAudio: verification.hasAudio, audioSkippedReason: result.audioSkippedReason,
+      repeatedFrames: result.repeatedFrames, verification };
   };
   try {
     sourceLease = await resolveProjectSources(project, 'export', logExport, cancel);

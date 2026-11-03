@@ -9,6 +9,7 @@ import com.getcapacitor.BridgeWebViewClient;
 import android.webkit.WebSettings;
 import com.clipnova.editor.MediaSaverPlugin;
 import com.clipnova.editor.NativeExitReasonPlugin;
+import com.clipnova.editor.AudioExtractorPlugin;
 
 public class MainActivity extends BridgeActivity {
   @Override
@@ -16,6 +17,7 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(MediaSaverPlugin.class);
     registerPlugin(NativeExporterPlugin.class);
     registerPlugin(NativeExitReasonPlugin.class);
+    registerPlugin(AudioExtractorPlugin.class);
     super.onCreate(savedInstanceState);
     WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
     // Allow audio playback without requiring a user gesture on Android WebView

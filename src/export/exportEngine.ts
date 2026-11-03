@@ -35,6 +35,8 @@ export interface ExportOptions {
     size: number;
     hasAudio: boolean;
     audioSkipped: boolean;
+    audioSkippedReason?: string;
+    repeatedFrames?: number;
     blob: Blob;
     log: ExportLogEntry[];
   }) => void | Promise<void>;

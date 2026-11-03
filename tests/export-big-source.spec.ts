@@ -21,12 +21,13 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
   test.setTimeout(300000);
   await page.goto('/');
 
-  const fixture = resolve('test-assets/big-60s-1080p.mp4');
+  const fixturePath = resolve('test-assets/big-60s-1080p.mp4');
   let fixtureSize = 0;
-  try { fixtureSize = (await import('node:fs')).statSync(fixture).size; } catch { /* fixture may not exist locally */ }
+  try { fixtureSize = (await import('node:fs')).statSync(fixturePath).size; } catch { /* fixture may not exist locally */ }
   test.skip(!fixtureSize || fixtureSize < 50 * 1024 * 1024, `big-source fixture missing or <50 MB (found ${fixtureSize} bytes)`);
+  const fixtureUrl = '/test-assets/big-60s-1080p.mp4';
 
-  const output = await page.evaluate(async (fixturePath: string) => {
+  const output = await page.evaluate(async (fixtureUrl: string) => {
     const exporterPath = '/src/export/exportProject.ts';
     const presetsPath = '/src/data/presets.ts';
     const { exportProject } = await import(exporterPath);
@@ -42,7 +43,7 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
       sourceStart: 20,        // cut from the middle of the source
       sourceEnd: 30,
       sourceType: 'uploaded-video',
-      mediaUrl: fixturePath,
+      mediaUrl: fixtureUrl,
       volume: 100,
       muted: false,
       transitionIn: 'none',
@@ -59,7 +60,7 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
       sourceStart: 30,
       sourceEnd: 40,
       sourceType: 'uploaded-video',
-      mediaUrl: fixturePath,
+      mediaUrl: fixtureUrl,
       volume: 100,
       muted: false,
       transitionIn: 'zoom',   // zoom transition between the two clips
@@ -107,7 +108,7 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
       audioSkipped: result.audioSkipped,
       verification: result.verification,
     };
-  }, fixture);
+  }, fixtureUrl);
 
   expect(output.verification.ok, output.verification.error || '').toBe(true);
   expect(output.frames).toBeGreaterThan(0);
@@ -154,12 +155,13 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
   test.setTimeout(300000);
   await page.goto('/');
 
-  const fixture = resolve('test-assets/big-60s-1080p.mp4');
+  const fixturePath = resolve('test-assets/big-60s-1080p.mp4');
   let fixtureSize = 0;
-  try { fixtureSize = (await import('node:fs')).statSync(fixture).size; } catch { /* fixture may not exist locally */ }
+  try { fixtureSize = (await import('node:fs')).statSync(fixturePath).size; } catch { /* fixture may not exist locally */ }
   test.skip(!fixtureSize || fixtureSize < 50 * 1024 * 1024, `big-source fixture missing or <50 MB (found ${fixtureSize} bytes)`);
+  const fixtureUrl = '/test-assets/big-60s-1080p.mp4';
 
-  const output = await page.evaluate(async (fixturePath: string) => {
+  const output = await page.evaluate(async (fixtureUrl: string) => {
     const exporterPath = '/src/export/exportProject.ts';
     const presetsPath = '/src/data/presets.ts';
     const { exportProject } = await import(exporterPath);
@@ -175,7 +177,7 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
       sourceStart: 0,
       sourceEnd: 60,
       sourceType: 'uploaded-video',
-      mediaUrl: fixturePath,
+      mediaUrl: fixtureUrl,
       volume: 100,
       muted: false,
       transitionIn: 'none',
@@ -222,7 +224,7 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
       audioSkipped: result.audioSkipped,
       verification: result.verification,
     };
-  }, fixture);
+  }, fixtureUrl);
 
   expect(output.verification.ok, output.verification.error || '').toBe(true);
   expect(output.frames).toBeGreaterThan(0);

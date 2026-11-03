@@ -144,7 +144,9 @@ export async function advanceVideo(el: HTMLVideoElement, target: number, fps: nu
       const frame: VideoFrameRequestCallback = (_now, meta) => {
         if (settled) return;
         if (cancel.current) { finish(false, new DOMException('Export cancelled', 'AbortError')); return; }
-        if (meta.mediaTime >= target - 0.5 / fps) finish(false);
+        // Accept only when mediaTime is within half a frame of target (two-sided).
+        // Previously accepted at target - 0.5/fps, which could be the previous frame.
+        if (Math.abs(meta.mediaTime - target) <= 0.5 / fps) finish(false);
         else callback = el.requestVideoFrameCallback(frame);
       };
       el.addEventListener('ended', onEnded);

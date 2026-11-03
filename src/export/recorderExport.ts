@@ -78,7 +78,7 @@ export async function encodeRecorder(opts: ExportOptions, log: (step: string, de
     recorder.stop(); await stopped; abortIfCancelled(cancelRef);
     const blob = new Blob(chunks, { type: mimeType.includes('mp4') ? 'video/mp4' : 'video/webm' });
     await opts.onResult({ format: mimeType.includes('mp4') ? 'MP4' : 'WebM', resolution: canvas.width + '×' + canvas.height,
-      duration, frames, size: blob.size, hasAudio: audio.hasAudio, audioSkipped: false, blob, log: [] });
+      duration, frames, size: blob.size, hasAudio: audio.hasAudio, audioSkipped: false, audioSkippedReason: '', blob, log: [] });
   } finally {
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     try { audioSource?.stop(); } catch {}

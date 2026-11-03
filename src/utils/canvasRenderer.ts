@@ -831,8 +831,14 @@ export function renderProjectFrame(
             if (!isPlaying) {
               const relTime = playheadTime - clip.startTime;
               const targetTime = clipSourceTime(clip, playheadTime, el.duration || Infinity);
-              if (!el.seeking && Math.abs(el.currentTime - targetTime) > 1 / 60) {
-                el.currentTime = targetTime;
+              // advanceVideo already synced this element; don't re-seek and risk
+              // re-decoding the previous frame. Only correct if exportTime is stale.
+              const exportTime = Number(el.dataset.exportTime ?? NaN);
+              if (!el.seeking && !Number.isFinite(exportTime) ||
+                  Math.abs(exportTime - targetTime) > 1 / 60) {
+                if (Math.abs(el.currentTime - targetTime) > 1 / 60) {
+                  el.currentTime = targetTime;
+                }
               }
             }
           }

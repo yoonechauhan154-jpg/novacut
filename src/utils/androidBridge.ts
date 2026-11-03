@@ -60,9 +60,31 @@ export function getMediaSaverPlugin(): MediaSaverPlugin | null {
   return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('MediaSaver') ? registeredMediaSaver : null;
 }
 
+/** Custom native plugin (AudioExtractorPlugin, registered in MainActivity). */
+export interface AudioExtractorPlugin {
+  extractAudioRange(opts: {
+    mediaUrl: string;
+    sourceStart: number;
+    sourceEnd: number;
+  }): Promise<{
+    uri: string;
+    path: string;
+    size: number;
+    samples: number;
+    durationSeconds: number;
+  }>;
+}
+
+const registeredAudioExtractor = registerPlugin<AudioExtractorPlugin>('AudioExtractor');
+
+export function getAudioExtractorPlugin(): AudioExtractorPlugin | null {
+  return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('AudioExtractor') ? registeredAudioExtractor : null;
+}
+
 declare module '@capacitor/core' {
   interface PluginRegistry {
     MediaSaver?: MediaSaverPlugin;
+    AudioExtractor?: AudioExtractorPlugin;
   }
 }
 
