@@ -59,8 +59,6 @@ public class AudioExtractorPlugin extends Plugin {
       }
       extractor.selectTrack(audioTrack);
       MediaFormat format = extractor.getTrackFormat(audioTrack);
-      int timescale = format.containsKey(MediaFormat.KEY_TIMESCALE)
-        ? format.getInteger(MediaFormat.KEY_TIMESCALE) : 1000000;
 
       long startUs = (long)(sourceStart * 1_000_000);
       long endUs = (long)(sourceEnd * 1_000_000);
