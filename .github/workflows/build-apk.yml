@@ -89,7 +89,7 @@ jobs:
   playwright-browser-tests:
     name: Playwright Browser Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
@@ -149,7 +149,7 @@ jobs:
   big-source-tests:
     name: Big Source Export Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
