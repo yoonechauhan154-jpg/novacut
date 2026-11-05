@@ -202,7 +202,7 @@ test('big source full duration (whole 25 s used) exports with audio', async ({ p
       trackType: 'effect-layer',
       title: 'Digital Glitch Slice FX',
       startTime: 0,
-      duration: 60,
+      duration: 25,
       sourceType: 'effect-layer',
       effect: 'glitch',
       effectIntensity: 75,

@@ -169,7 +169,7 @@ async function demuxAudioRange(
     };
 
     try {
-      file.appendBuffer({ data: new Uint8Array(fileData), fileStart: 0 } as any);
+      file.appendBuffer({ data: fileData, fileStart: 0 } as any);
       file.flush();
     } catch (err) {
       if (!settled) {
