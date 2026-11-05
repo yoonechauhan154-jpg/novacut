@@ -68,7 +68,7 @@ const PROBE_SCRIPT = `
 })();
 `;
 
-const completeOnboarding = async (page) => {
+const completeOnboarding = async (page: import('@playwright/test').Page) => {
   for (let i = 0; i < 5; i++) {
     const nextBtn = page.locator('button:has-text("Next"),button:has-text("आगे बढ़ें")').first();
     const doneBtn = page.locator('button:has-text("Start Editing"),button:has-text("एडिटिंग शुरू करें")').first();

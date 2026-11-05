@@ -129,7 +129,7 @@ const PROBE_SCRIPT = `
 })();
 `;
 
-const completeOnboarding = async (page) => {
+const completeOnboarding = async (page: import('@playwright/test').Page) => {
   for (let i = 0; i < 5; i++) {
     const nextBtn = page.locator('button:has-text("Next"),button:has-text("आगे बढ़ें")').first();
     const doneBtn = page.locator('button:has-text("Start Editing"),button:has-text("एडिटिंग शुरू करें")').first();
@@ -179,8 +179,8 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   const viewport = page.viewportSize();
   console.log('Container box:', containerBox, 'Viewport:', viewport);
   expect(containerBox).not.toBeNull();
-  expect(containerBox!.width).toBeGreaterThan(viewport!.width * 0.8, 'Preview container should fill most of viewport width');
-  expect(containerBox!.height).toBeGreaterThan(viewport!.height * 0.8, 'Preview container should fill most of viewport height');
+  expect(containerBox!.width, 'Preview container should fill most of viewport width').toBeGreaterThan(viewport!.width * 0.8);
+  expect(containerBox!.height, 'Preview container should fill most of viewport height').toBeGreaterThan(viewport!.height * 0.8);
 
   // Verify editor UI is covered by fullscreen overlay (z-index coverage, not display:none)
   const topBar = page.locator('header').first();
@@ -202,7 +202,7 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   }
 
   mediaCount = await page.evaluate(() => (window as any).__probe?.playingMediaCount || 0);
-  expect(mediaCount).toBe(1, 'Exactly 1 media element should be playing in fullscreen');
+  expect(mediaCount, 'Exactly 1 media element should be playing in fullscreen').toBe(1);
 
   // Drag the seek bar - scope within overlay
   const seekInput = fsOverlay.locator('input[type="range"]').first();
@@ -218,7 +218,7 @@ test('FULLSCREEN: enter fullscreen, preview fills viewport, single media element
   }
 
   mediaCount = await page.evaluate(() => (window as any).__probe?.playingMediaCount || 0);
-  expect(mediaCount).toBe(0, '0 media elements should be playing after pause');
+  expect(mediaCount, '0 media elements should be playing after pause').toBe(0);
 
   // Verify close button exists (proves fullscreen overlay has close control)
   const closeBtn = fsOverlay.locator('button[aria-label="Close fullscreen"]').first();

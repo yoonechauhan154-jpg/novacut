@@ -120,6 +120,9 @@ export interface ColorAdjustments {
 }
 
 export interface ImportedMediaItem {
+  originalName?: string;
+  size?: number;
+  mimeType?: string;
   id: string;
   name: string;
   kind: 'video' | 'image' | 'audio' | 'procedural';
@@ -132,6 +135,8 @@ export interface ImportedMediaItem {
 }
 
 export interface TimelineClip {
+  /** Resolved app-owned native source; never an export temporary file. */
+  mediaNativeUri?: string;
   id: string;
   trackId: string;
   trackType: TrackType;
@@ -162,6 +167,7 @@ export interface TimelineClip {
   thumbnailUrl?: string;
   // Transform & playback
   speed: number; // 0.1 to 10
+  keepPitch?: boolean; // defaults true; false changes pitch with speed
   speedCurve: SpeedCurvePreset;
   smoothSlowMo?: boolean;
   reversed: boolean;

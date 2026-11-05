@@ -1,0 +1,162 @@
+import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
+import type { ExportOptions } from './exportEngine';
+import type { DecodedPcm } from './audioPipeline';
+import { renderProjectAudioChunked } from './audioPipeline';
+import { createExportMedia, advanceVideo, abortIfCancelled, clipSourceTime } from './exportMedia';
+import { getAspectDimensions, renderProjectFrame } from '../utils/canvasRenderer';
+
+export async function encodeWebCodecs(opts: ExportOptions, log: (step: string, detail: string) => void) {
+  const { project, cancelRef } = opts;
+  const duration = Math.max(0, ...project.clips.map(c => c.startTime + c.duration));
+  if (!duration) throw new Error('Timeline is empty');
+  if (duration > 180) throw new Error('WebView export memory limit (180s); trying native export');
+  if (typeof VideoEncoder === 'undefined') throw new Error('WebCodecs VideoEncoder unavailable');
+  const { width, height } = getAspectDimensions(project.aspectRatio, 'export-full', project.resolution);
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Export canvas unavailable');
+  const config: VideoEncoderConfig = {
+    codec: 'avc1.420028', width, height, bitrate: Math.max(1000000, width * height * 3),
+    framerate: project.fps, latencyMode: 'realtime', avc: { format: 'avc' },
+  };
+  if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error('H.264 encoder does not support the requested dimensions');
+  const resources = await createExportMedia(project, cancelRef, log, true);
+  let encoder: VideoEncoder | undefined;
+  let audioEncoder: AudioEncoder | undefined;
+  let encoderError: Error | undefined;
+  const check = () => { abortIfCancelled(cancelRef); if (encoderError) throw encoderError; };
+  const pause = () => new Promise(r => setTimeout(r, 4));
+  try {
+    // Fix #2 + #3: use the chunked audio pipeline (bounded memory, used-range demux).
+    // Audio failure never kills the video export — on error we log "audio skipped: <reason>"
+    // and continue with a video-only output.
+    let audioChunks: DecodedPcm[] = [];
+    let hasAudio = false;
+    let audioSkippedReason = '';
+    if (!opts.safeMode) {
+      try {
+        const rendered = await renderProjectAudioChunked(project, log);
+        audioChunks = rendered.chunks;
+        hasAudio = rendered.hasAudio && audioChunks.length > 0;
+        // Log every pipeline step so a phone failure shows exactly where it broke.
+        for (const step of rendered.trace.steps) { log('audio-trace', step); }
+        if (rendered.trace.skipReason) {
+          audioSkippedReason = rendered.trace.skipReason;
+          log('audio-skipped', `audio skipped: ${rendered.trace.skipReason}`);
+        } else if (!hasAudio) {
+          audioSkippedReason = 'no audio chunks produced';
+          log('audio-skipped', 'audio skipped: no audio chunks produced');
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        audioSkippedReason = reason;
+        log('audio-skipped', `audio skipped: ${reason}`);
+        hasAudio = false;
+      }
+    }
+
+    const audioConfig = { codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: 2, bitrate: 128000 };
+    // If audio is wanted but the AAC encoder is unavailable, drop audio rather than aborting.
+    if (hasAudio && (typeof AudioEncoder === 'undefined' || !(await AudioEncoder.isConfigSupported(audioConfig)).supported)) {
+      audioSkippedReason = 'AAC encoder unavailable';
+      log('audio-skipped', 'audio skipped: AAC encoder unavailable');
+      hasAudio = false;
+    }
+    const target = new ArrayBufferTarget();
+    const muxer = new Muxer({
+      target, video: { codec: 'avc', width, height, frameRate: project.fps },
+      audio: hasAudio ? { codec: 'aac', numberOfChannels: 2, sampleRate: 48000 } : undefined,
+      fastStart: 'in-memory', firstTimestampBehavior: 'offset',
+    });
+    let chunks = 0;
+    let repeatedFrames = 0;
+    const prevCurrentTime = new Map<string, number>();
+    encoder = new VideoEncoder({
+      output: (chunk, metadata) => { muxer.addVideoChunk(chunk, metadata); chunks++; },
+      error: err => { encoderError = err; },
+    });
+    encoder.configure(config);
+    const totalFrames = Math.ceil(duration * project.fps);
+    const started = performance.now();
+    for (let i = 0; i < totalFrames; i++) {
+      check();
+      const time = i / project.fps;
+      await resources.prepare(time);
+      for (const clip of project.clips) {
+        if (time < clip.startTime || time >= clip.startTime + clip.duration || clip.muted) continue;
+        const el = resources.media.get(clip.id);
+        if (el instanceof HTMLVideoElement) {
+          const before = el.currentTime;
+          await advanceVideo(el, clipSourceTime(clip, time, el.duration), project.fps, cancelRef, log);
+          const after = el.currentTime;
+          prevCurrentTime.set(clip.id, after);
+          // If currentTime didn't advance between output frames, the same source
+          // frame will be drawn twice — count it as a repeated frame.
+          if (Math.abs(after - before) < 0.5 / project.fps) repeatedFrames++;
+        }
+      }
+      check();
+      renderProjectFrame(ctx, project, time, resources.media, 'export-full', true);
+      const slotDeadline = performance.now() + 10000;
+      while (encoder.encodeQueueSize >= 3) {
+        check(); if (performance.now() > slotDeadline) throw new Error('Video encoder queue stalled');
+        await pause();
+      }
+      const timestamp = Math.round(i * 1000000 / project.fps);
+      const frame = new VideoFrame(canvas, {
+        timestamp, duration: Math.round((i + 1) * 1000000 / project.fps) - timestamp,
+      });
+      try { encoder.encode(frame, { keyFrame: i % (project.fps * 2) === 0 }); }
+      finally { frame.close(); }
+      const pct = Math.round((i + 1) * 90 / totalFrames);
+      opts.onProgress(pct, i + 1, totalFrames, (performance.now() - started) / (i + 1) * (totalFrames - i - 1));
+      if (i % 25 === 0) log('frame', i + '/' + totalFrames + ' chunks=' + chunks + ' queue=' + encoder.encodeQueueSize);
+      await pause();
+    }
+    await encoder.flush(); check();
+    // Fix #2: feed AudioEncoder from chunked PCM, one chunk at a time, freeing each after use.
+    if (hasAudio && audioChunks.length > 0) {
+      audioEncoder = new AudioEncoder({
+        output: (chunk, metadata) => muxer.addAudioChunk(chunk, metadata),
+        error: err => { encoderError = err; },
+      });
+      audioEncoder.configure(audioConfig);
+      let sampleOffset = 0;
+      for (const pcm of audioChunks) {
+        check();
+        const channelData = pcm.channelData;
+        const frameCount = pcm.frameCount;
+        for (let offset = 0; offset < frameCount; offset += 1024) {
+          check();
+          const count = Math.min(1024, frameCount - offset);
+          const data = new Float32Array(count * 2);
+          for (let c = 0; c < 2; c++) {
+            const src = channelData[c] || new Float32Array(0);
+            for (let k = 0; k < count; k++) data[k * 2 + c] = src[offset + k] ?? 0;
+          }
+          const packet = new AudioData({ format: 'f32-planar', sampleRate: pcm.sampleRate, numberOfChannels: 2,
+            numberOfFrames: count, timestamp: Math.round((sampleOffset + offset) * 1000000 / pcm.sampleRate), data });
+          try { audioEncoder.encode(packet); } finally { packet.close(); }
+          const deadline = performance.now() + 10000;
+          while (audioEncoder.encodeQueueSize >= 8) {
+            check(); if (performance.now() > deadline) throw new Error('Audio encoder queue stalled');
+            await pause();
+          }
+        }
+        sampleOffset += frameCount;
+        // Free the chunk's channel data after use.
+        for (const ch of channelData) { ch.fill(0); }
+      }
+      await audioEncoder.flush(); check();
+    }
+    muxer.finalize(); check();
+    const blob = new Blob([target.buffer], { type: 'video/mp4' });
+    log('mux-done', 'frames=' + chunks + ' bytes=' + blob.size + ' audio=' + hasAudio + ' repeated=' + repeatedFrames);
+    await opts.onResult({ format: 'MP4 (H.264 + AAC)', resolution: width + '×' + height, duration,
+      frames: chunks, size: blob.size, hasAudio, audioSkipped: !hasAudio, audioSkippedReason, repeatedFrames, blob, log: [] });
+  } finally {
+    try { encoder?.close(); } catch {}
+    try { audioEncoder?.close(); } catch {}
+    resources.dispose();
+  }
+}

@@ -196,7 +196,7 @@ test('BUG A: play continuously across split point after split', async ({ page })
   // Verify paused
   state = await page.evaluate(() => (window as any).__probe?.getMediaState?.());
   playing = state.filter((e: any) => !e.paused);
-  expect(playing.length).toBe(0, 'Video should be paused after split');
+  expect(playing.length, 'Video should be paused after split').toBe(0);
 
   // Now press Play to resume across split point
   const playPauseBtn = page.locator('button[aria-label="Play"], button[aria-label="Pause"]').first();
@@ -204,7 +204,7 @@ test('BUG A: play continuously across split point after split', async ({ page })
   await page.waitForTimeout(500);
 
   // Sample playback every 250ms for 5 seconds
-  const samples: Array<Record<string, unknown>> = [];
+  const samples: Array<{ wallClock: number; playhead: number; readyState: number; paused: boolean; debug: { playheadTime?: number; activeClipId?: string; isPlaying?: boolean } | null }> = [];
   const startWall = Date.now();
   let playRejected = false;
 
@@ -240,7 +240,7 @@ test('BUG A: play continuously across split point after split', async ({ page })
   console.log('BUG A playRejected:', playRejected);
 
   // --- ASSERTIONS for Bug A ---
-  expect(samples.length).toBeGreaterThan(5, 'No playing samples after pressing Play post-split');
+  expect(samples.length, 'No playing samples after pressing Play post-split').toBeGreaterThan(5);
   const firstSample = samples[0];
   const lastSample = samples[samples.length - 1];
 
@@ -253,7 +253,7 @@ test('BUG A: play continuously across split point after split', async ({ page })
     }
     prevPlayhead = s.playhead;
   }
-  expect(backwardJumps).toBe(0, `Found ${backwardJumps} backward playhead jumps (wrap to 0) after split+play`);
+  expect(backwardJumps, `Found ${backwardJumps} backward playhead jumps (wrap to 0) after split+play`).toBe(0);
 
   // 2. App-internal playheadTime must not jump backwards (catches split-clip revert)
   let prevDbgTime: number | null = null;
@@ -265,38 +265,38 @@ test('BUG A: play continuously across split point after split', async ({ page })
     }
     if (t !== undefined) prevDbgTime = t;
   }
-  expect(dbgBackwardJumps).toBe(0, `Found ${dbgBackwardJumps} backward playheadTime jumps in app state after split+play`);
+  expect(dbgBackwardJumps, `Found ${dbgBackwardJumps} backward playheadTime jumps in app state after split+play`).toBe(0);
 
   // 3. activeClipId must stay on the split clip, not revert to the original clip
   const clipIds = samples.map((s: any) => s.debug?.activeClipId).filter(Boolean);
   const splitClipId = clipIds.find((id: string) => id && id.includes('split'));
   if (splitClipId) {
     const revertedToOriginal = clipIds.some((id: string) => id && !id.includes('split') && id !== splitClipId);
-    expect(revertedToOriginal).toBe(false, `activeClipId reverted from split clip '${splitClipId}' to original clip`);
+    expect(revertedToOriginal, `activeClipId reverted from split clip '${splitClipId}' to original clip`).toBe(false);
   }
 
   // 4. Playhead must advance by at least 1.0s somewhere
   const maxPlayhead = Math.max(...samples.map((s) => s.playhead));
   const minPlayhead = Math.min(...samples.map((s) => s.playhead));
   const playheadAdvanced = maxPlayhead - minPlayhead > 1.0;
-  expect(playheadAdvanced).toBe(true, `Playhead did not advance by 1s after split+play. Range: [${minPlayhead}, ${maxPlayhead}]`);
+  expect(playheadAdvanced, `Playhead did not advance by 1s after split+play. Range: [${minPlayhead}, ${maxPlayhead}]`).toBe(true);
 
   // 5. isPlaying must stay true throughout (no silent stop)
   const stoppedSamples = samples.filter((s: any) => s.debug && s.debug.isPlaying === false);
-  expect(stoppedSamples.length).toBe(0, `Found ${stoppedSamples.length} samples where app reports isPlaying=false mid-playback`);
+  expect(stoppedSamples.length, `Found ${stoppedSamples.length} samples where app reports isPlaying=false mid-playback`).toBe(0);
 
-  expect(waitingStalled.length).toBe(0, `Found waiting/stalled events: ${JSON.stringify(waitingStalled.slice(0,5))}`);
+  expect(waitingStalled.length, `Found waiting/stalled events: ${JSON.stringify(waitingStalled.slice(0,5))}`).toBe(0);
 
   const lowReadyState = samples.filter((s) => s.readyState < 2);
   const consecutiveLow = lowReadyState.length;
-  expect(consecutiveLow).toBeLessThanOrEqual(2, `Found ${consecutiveLow} samples with readyState < 2 after split+play: ${JSON.stringify(lowReadyState.slice(0,5))}`);
+  expect(consecutiveLow, `Found ${consecutiveLow} samples with readyState < 2 after split+play: ${JSON.stringify(lowReadyState.slice(0,5))}`).toBeLessThanOrEqual(2);
 
   const wallDiff = lastSample.wallClock - firstSample.wallClock;
   const playheadDiff = lastSample.playhead - firstSample.playhead;
   if (wallDiff > 0 && playheadDiff > 0) {
     const ratio = playheadDiff / wallDiff;
-    expect(ratio).toBeGreaterThan(0.8, 'Playhead advancing slower than real-time');
-    expect(ratio).toBeLessThan(1.2, 'Playhead advancing faster than real-time');
+    expect(ratio, 'Playhead advancing slower than real-time').toBeGreaterThan(0.8);
+    expect(ratio, 'Playhead advancing faster than real-time').toBeLessThan(1.2);
   }
 
   expect(playRejected).toBe(false);
