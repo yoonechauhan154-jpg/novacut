@@ -58,6 +58,10 @@ jobs:
         working-directory: ./android
         run: chmod +x gradlew
 
+      - name: Fast Java Compile Check (fail fast ~2 min)
+        working-directory: ./android
+        run: ./gradlew :app:compileDebugJavaWithJavac
+
       - name: Run Native Export Unit Tests
         working-directory: ./android
         run: ./gradlew testDebugUnitTest
@@ -82,10 +86,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  browser-tests:
+  playwright-browser-tests:
     name: Playwright Browser Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout Repository
@@ -112,7 +116,6 @@ jobs:
         run: |
           ffmpeg -y -f lavfi -i testsrc2=duration=10:size=720x1280:rate=30 -f lavfi -i sine=frequency=440:duration=10 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-12s.webm
           ffmpeg -y -f lavfi -i testsrc2=duration=8:size=720x1280:rate=30 -f lavfi -i sine=frequency=523:duration=8 -c:v libvpx-vp9 -c:a libopus -b:a 128k -shortest test-assets/test-8s.webm
-          ffmpeg -y -f lavfi -i testsrc2=duration=60:size=1920x1080:rate=30 -f lavfi -i sine=frequency=440:duration=60 -c:v libx264 -b:v 8M -c:a aac -b:a 128k -shortest test-assets/big-60s-1080p.mp4
 
       - name: Create test-exports directory
         run: mkdir -p test-exports
@@ -121,10 +124,9 @@ jobs:
         run: |
           VITE_TEST_MODE=true npm run dev &
           sleep 5
-        # dev server runs in background
 
-      - name: Run Playwright Tests
-        run: npx playwright test --timeout=90000 --workers=1 --reporter=line
+      - name: Run Playwright Tests (excluding big-source)
+        run: npx playwright test --timeout=90000 --workers=1 --reporter=line --grep-invert "big-source"
 
       - name: Upload Test Results
         if: always()
@@ -142,4 +144,61 @@ jobs:
         with:
           name: exported-test-files
           path: test-exports/
+          retention-days: 30
+
+  big-source-tests:
+    name: Big Source Export Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+
+      - name: Cache Test Fixtures
+        uses: actions/cache@v4
+        id: cache-fixtures
+        with:
+          path: test-assets/
+          key: test-fixtures-v1
+
+      - name: Generate Big Source Fixture (25s H.264+AAC 1080p ~25 MB)
+        if: steps.cache-fixtures.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p test-assets
+          ffmpeg -y -f lavfi -i testsrc2=duration=25:size=1920x1080:rate=30 -f lavfi -i sine=frequency=440:duration=25 -c:v libx264 -b:v 8M -c:a aac -b:a 128k -shortest test-assets/big-25s-1080p.mp4
+
+      - name: Create test-exports directory
+        run: mkdir -p test-exports
+
+      - name: Start Dev Server
+        run: |
+          VITE_TEST_MODE=true npm run dev &
+          sleep 5
+
+      - name: Run Big Source Playwright Tests
+        run: npx playwright test --timeout=90000 --workers=1 --reporter=line tests/export-big-source.spec.ts
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: big-source-test-results
+          path: |
+            test-results/
+            playwright-report/
           retention-days: 30

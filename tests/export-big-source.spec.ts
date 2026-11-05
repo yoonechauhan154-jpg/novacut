@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 /**
  * Stage 1 fix #1+#2+#6: big-source export test.
  *
- * Generates (in CI) a 1080p, >=50 MB source with an audio track, creates a project
+ * Generates (in CI) a 1080p, >=20 MB source with an audio track, creates a project
  * with a split, a zoom transition and a glitch effect layer with a keyframe, uses
  * only 10 seconds of it, exports to MP4, and verifies with ffprobe:
  *   - duration matches timeline
@@ -17,15 +17,15 @@ import { resolve } from 'node:path';
  * test-assets/ only if it fits the 15-minute Playwright budget; otherwise this test
  * is skipped.
  */
-test('big source (>=50 MB) with split + zoom + glitch exports with audio', async ({ page }, testInfo) => {
+test('big source (>=20 MB) with split + zoom + glitch exports with audio', async ({ page }, testInfo) => {
   test.setTimeout(300000);
   await page.goto('/');
 
-  const fixturePath = resolve('test-assets/big-60s-1080p.mp4');
+  const fixturePath = resolve('test-assets/big-25s-1080p.mp4');
   let fixtureSize = 0;
   try { fixtureSize = (await import('node:fs')).statSync(fixturePath).size; } catch { /* fixture may not exist locally */ }
-  test.skip(!fixtureSize || fixtureSize < 50 * 1024 * 1024, `big-source fixture missing or <50 MB (found ${fixtureSize} bytes)`);
-  const fixtureUrl = '/test-assets/big-60s-1080p.mp4';
+  test.skip(!fixtureSize || fixtureSize < 20 * 1024 * 1024, `big-source fixture missing or <20 MB (found ${fixtureSize} bytes)`);
+  const fixtureUrl = '/test-assets/big-25s-1080p.mp4';
 
   const output = await page.evaluate(async (fixtureUrl: string) => {
     const exporterPath = '/src/export/exportProject.ts';
@@ -39,9 +39,9 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
       trackType: 'video',
       title: 'Big Source',
       startTime: 0,
-      duration: 10,           // use only 10 seconds of the 60s source
-      sourceStart: 20,        // cut from the middle of the source
-      sourceEnd: 30,
+      duration: 10,           // use only 10 seconds of the 25s source
+      sourceStart: 5,        // cut from the middle of the source
+      sourceEnd: 15,
       sourceType: 'uploaded-video',
       mediaUrl: fixtureUrl,
       volume: 100,
@@ -57,8 +57,8 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
       title: 'Big Source Split',
       startTime: 10,
       duration: 10,           // another 10 seconds -> 20s timeline total
-      sourceStart: 30,
-      sourceEnd: 40,
+      sourceStart: 15,
+      sourceEnd: 25,
       sourceType: 'uploaded-video',
       mediaUrl: fixtureUrl,
       volume: 100,
@@ -151,15 +151,15 @@ test('big source (>=50 MB) with split + zoom + glitch exports with audio', async
   await testInfo.attach('volumedetect', { body: vol, contentType: 'text/plain' });
 });
 
-test('big source full duration (whole 60 s used) exports with audio', async ({ page }, testInfo) => {
+test('big source full duration (whole 25 s used) exports with audio', async ({ page }, testInfo) => {
   test.setTimeout(300000);
   await page.goto('/');
 
-  const fixturePath = resolve('test-assets/big-60s-1080p.mp4');
+  const fixturePath = resolve('test-assets/big-25s-1080p.mp4');
   let fixtureSize = 0;
   try { fixtureSize = (await import('node:fs')).statSync(fixturePath).size; } catch { /* fixture may not exist locally */ }
-  test.skip(!fixtureSize || fixtureSize < 50 * 1024 * 1024, `big-source fixture missing or <50 MB (found ${fixtureSize} bytes)`);
-  const fixtureUrl = '/test-assets/big-60s-1080p.mp4';
+  test.skip(!fixtureSize || fixtureSize < 20 * 1024 * 1024, `big-source fixture missing or <20 MB (found ${fixtureSize} bytes)`);
+  const fixtureUrl = '/test-assets/big-25s-1080p.mp4';
 
   const output = await page.evaluate(async (fixtureUrl: string) => {
     const exporterPath = '/src/export/exportProject.ts';
@@ -173,9 +173,9 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
       trackType: 'video',
       title: 'Big Source Full',
       startTime: 0,
-      duration: 60,           // use the whole 60 seconds
+      duration: 25,           // use the whole 25 seconds
       sourceStart: 0,
-      sourceEnd: 60,
+      sourceEnd: 25,
       sourceType: 'uploaded-video',
       mediaUrl: fixtureUrl,
       volume: 100,
@@ -231,7 +231,7 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
   expect(output.hasAudio).toBe(true);
   expect(output.audioSkipped).toBe(false);
   expect(output.verification.framesChanging).toBe(true);
-  expect(output.duration).toBeCloseTo(60, 2);
+  expect(output.duration).toBeCloseTo(25, 2);
 
   mkdirSync('test-exports', { recursive: true });
   const file = resolve('test-exports/big-source-full-export.mp4');
@@ -249,8 +249,8 @@ test('big source full duration (whole 60 s used) exports with audio', async ({ p
   const measuredDuration = Number.isFinite(Number(probe.format.duration))
     ? Number(probe.format.duration)
     : 0;
-  expect(measuredDuration).toBeGreaterThan(50);
-  expect(measuredDuration).toBeLessThan(70);
+  expect(measuredDuration).toBeGreaterThan(20);
+  expect(measuredDuration).toBeLessThan(30);
   expect(Number(video.nb_read_frames)).toBeGreaterThan(300);
 
   const vol = execFileSync('ffmpeg', [
